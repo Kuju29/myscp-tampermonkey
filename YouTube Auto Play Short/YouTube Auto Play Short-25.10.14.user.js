@@ -299,18 +299,45 @@
 
     function pickRandom(a){ if(!a.length) return null; return a[Math.floor(Math.random()*a.length)]; }
 
-    function detectLanguage(text){
-        if(!defaultSettings.detectLanguage) return 'unknown';
-        const t = String(text || '');
-
-        if (LANG_PATTERNS.thai.test(t)) return 'thai';
-        if (LANG_PATTERNS.lao.test(t)) return 'lao';
-        if (LANG_PATTERNS.korean.test(t)) return 'korean';
-        if (LANG_PATTERNS.japanese.test(t)) return 'japanese';
-        if (LANG_PATTERNS.cjk.test(t)) return 'chinese';
-
+    function detectLanguage(text) {
+        if (!defaultSettings.detectLanguage) return 'unknown';
+    
+        let t = String(text || '').trim();
+        if (!t) return 'unknown';
+    
+        t = t
+            .replace(/【[^】]*】/g, ' ')
+            .replace(/\[[^\]]*\]/g, ' ')
+            .replace(/\([^)]*\b(?:official|audio|video|mv|lyrics?|ver\.?|version)\b[^)]*\)/ig, ' ')
+            .replace(/\b(?:official|music|video|official music video|mv|lyrics?|audio)\b/ig, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    
+        const segments = t
+            .split(/[-–—|:/]+/)
+            .map(s => s.trim())
+            .filter(Boolean);
+    
+        for (const seg of segments) {
+            const lao = (seg.match(/[\u0E80-\u0EFF]/g) || []).length;
+            const thai = (seg.match(/[\u0E00-\u0E7F]/g) || []).length;
+            const korean = (seg.match(/[\uAC00-\uD7AF]/g) || []).length;
+            const japanese = (seg.match(/[\u3040-\u30FF]/g) || []).length;
+            const chinese = (seg.match(/[\u4E00-\u9FFF]/g) || []).length;
+    
+            const bestNonLatin = [
+                ['lao', lao],
+                ['thai', thai],
+                ['korean', korean],
+                ['japanese', japanese],
+                ['chinese', chinese]
+            ].sort((a, b) => b[1] - a[1])[0];
+    
+            if (bestNonLatin[1] > 0) return bestNonLatin[0];
+        }
+    
         if (/[A-Za-z]/.test(t)) return 'latin';
-
+    
         return 'unknown';
     }
 
