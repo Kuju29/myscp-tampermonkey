@@ -62,13 +62,15 @@
 
             titleSpan: [
                 '.yt-lockup-metadata-view-model__title span.yt-core-attributed-string',
-                '.yt-lockup-metadata-view-model-wiz__title span.yt-core-attributed-string'
+                '.yt-lockup-metadata-view-model-wiz__title span.yt-core-attributed-string',
+                '.yt-lockup-metadata-view-model__heading-reset [role="text"]'
             ].join(', '),
 
             metadataContainer: [
                 '.yt-lockup-view-model-wiz__metadata',
                 '.yt-lockup-metadata-view-model__metadata',
-                '.yt-lockup-metadata-view-model-wiz__metadata'
+                '.yt-lockup-metadata-view-model-wiz__metadata',
+                '.yt-lockup-view-model__metadata'
             ].join(', '),
 
             metadataRow: [
@@ -394,35 +396,53 @@
     }
 
     function getVideoInfo(item){
-        const titleLink = item.querySelector(SELECTORS.modern.titleLink) ||
+        const titleLink =
+              item.querySelector(SELECTORS.modern.titleLink) ||
               item.querySelector(SELECTORS.modern.contentImageLink);
+
         const titleSpan = item.querySelector(SELECTORS.modern.titleSpan);
-        const title = (titleSpan?.textContent?.trim())
-        || titleLink?.getAttribute?.('title')
-        || titleLink?.getAttribute?.('aria-label')
-        || titleLink?.textContent?.trim()
-        || '';
+        const heading = item.querySelector('.yt-lockup-metadata-view-model__heading-reset');
+
+        const title =
+              titleSpan?.textContent?.trim() ||
+              heading?.getAttribute?.('title') ||
+              titleLink?.getAttribute?.('title') ||
+              titleLink?.getAttribute?.('aria-label') ||
+              titleLink?.textContent?.trim() ||
+              '';
 
         const rows = Array.from(item.querySelectorAll(SELECTORS.modern.metadataRow));
-        let views = 0, age = 0;
-        for (const r of rows) {
-            const txt = r.textContent.trim();
-            if (/การดู|views?/i.test(txt)) {
-                const parts = txt.split(/•/).map(s=>s.trim());
-                if (parts.length>=1) views = parseViews(parts[0]);
-                if (parts.length>=2) age = parseUploadAge(parts[1]);
-            } else if (!views && /แสน|ล้าน|หมื่น|พันครั้ง|ครั้ง|views?/i.test(txt)) {
-                views = parseViews(txt);
-            } else if (!age && /(ปี|เดือน|สัปดาห์|วัน|อัปเดตแล้ววันนี้|วันนี้|ใหม่|month|year|week|day|hour|min)/i.test(txt)) {
-                age = parseUploadAge(txt);
+
+        let views = 0;
+        let age = 0;
+
+        for (const row of rows) {
+            const parts = Array.from(row.querySelectorAll('span'))
+            .map(el => el.textContent?.trim())
+            .filter(Boolean);
+
+            for (const txt of parts) {
+                if (!views && /(การดู|views?|ครั้ง)/i.test(txt)) {
+                    views = parseViews(txt);
+                }
+                if (!age && /(ปี|เดือน|สัปดาห์|วัน|ชั่วโมง|นาที|วันนี้|ใหม่|year|month|week|day|hour|min)/i.test(txt)) {
+                    age = parseUploadAge(txt);
+                }
+            }
+
+            if ((!views || !age) && parts.length === 0) {
+                const txt = row.textContent.trim();
+                if (!views && /(การดู|views?|ครั้ง)/i.test(txt)) views = parseViews(txt);
+                if (!age && /(ปี|เดือน|สัปดาห์|วัน|ชั่วโมง|นาที|วันนี้|ใหม่|year|month|week|day|hour|min)/i.test(txt)) age = parseUploadAge(txt);
             }
         }
 
-        const durationText = item.querySelector(SELECTORS.modern.badgeDuration)?.textContent.trim() || '';
-        let duration = parseDuration(durationText) || extractDurationFallbackFromAria(titleLink);
+        const durationText = item.querySelector(SELECTORS.modern.badgeDuration)?.textContent?.trim() || '';
+        const duration = parseDuration(durationText) || extractDurationFallbackFromAria(titleLink);
 
         const progress = !!item.querySelector(SELECTORS.modern.watchedBar);
         const href = titleLink?.getAttribute('href') || '';
+
         return { title, views, age, duration, progress, href };
     }
 
