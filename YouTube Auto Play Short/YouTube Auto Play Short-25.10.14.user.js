@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         YouTube Auto Play Short
-// @version      25.10.14
+// @version      26.04.05
 // @description  Automatically pick and play short, high‑view videos (with optional language matching) when a video ends, falling back to endscreen if sidebar fails.
 // @match        *://www.youtube.com/*
-// @updateURL    https://gist.githubusercontent.com/Kuju29/a34cf4e362e7342991b763433b8529ca/raw/YouTube%2520Auto%2520Play%2520Short%2520Videos.user.js
-// @downloadURL  https://gist.githubusercontent.com/Kuju29/a34cf4e362e7342991b763433b8529ca/raw/YouTube%2520Auto%2520Play%2520Short%2520Videos.user.js
+// @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short-25.10.14.user.js
+// @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short-25.10.14.user.js
 // @grant        GM_registerMenuCommand
 // @run-at       document-start
 // ==/UserScript==
@@ -73,7 +73,8 @@
 
             metadataRow: [
                 '.yt-content-metadata-view-model__metadata-row',
-                '.yt-content-metadata-view-model-wiz__metadata-row'
+                '.yt-content-metadata-view-model-wiz__metadata-row',
+                '.ytContentMetadataViewModelMetadataRow'
             ].join(', '),
 
             badgeDuration: [
@@ -301,10 +302,10 @@
 
     function detectLanguage(text) {
         if (!defaultSettings.detectLanguage) return 'unknown';
-    
+
         let t = String(text || '').trim();
         if (!t) return 'unknown';
-    
+
         t = t
             .replace(/【[^】]*】/g, ' ')
             .replace(/\[[^\]]*\]/g, ' ')
@@ -312,19 +313,19 @@
             .replace(/\b(?:official|music|video|official music video|mv|lyrics?|audio)\b/ig, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-    
+
         const segments = t
-            .split(/[-–—|:/]+/)
-            .map(s => s.trim())
-            .filter(Boolean);
-    
+        .split(/[-–—|:/]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+
         for (const seg of segments) {
             const lao = (seg.match(/[\u0E80-\u0EFF]/g) || []).length;
             const thai = (seg.match(/[\u0E00-\u0E7F]/g) || []).length;
             const korean = (seg.match(/[\uAC00-\uD7AF]/g) || []).length;
             const japanese = (seg.match(/[\u3040-\u30FF]/g) || []).length;
             const chinese = (seg.match(/[\u4E00-\u9FFF]/g) || []).length;
-    
+
             const bestNonLatin = [
                 ['lao', lao],
                 ['thai', thai],
@@ -332,12 +333,12 @@
                 ['japanese', japanese],
                 ['chinese', chinese]
             ].sort((a, b) => b[1] - a[1])[0];
-    
+
             if (bestNonLatin[1] > 0) return bestNonLatin[0];
         }
-    
+
         if (/[A-Za-z]/.test(t)) return 'latin';
-    
+
         return 'unknown';
     }
 
@@ -354,7 +355,7 @@
     }
 
 
-    /* =========================
+ /* =========================
  *  PARSERS
  * ========================= */
 
