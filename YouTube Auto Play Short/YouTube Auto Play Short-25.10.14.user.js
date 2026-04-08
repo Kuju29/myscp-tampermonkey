@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         YouTube Auto Play Short
-// @version      26.04.05
+// @version      26.04.08
 // @description  Automatically pick and play short, high‑view videos (with optional language matching) when a video ends, falling back to endscreen if sidebar fails.
 // @match        *://www.youtube.com/*
 // @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short-25.10.14.user.js
@@ -52,7 +52,8 @@
         modern: {
             titleLink: [
                 'a.yt-lockup-metadata-view-model__title',
-                'a.yt-lockup-metadata-view-model-wiz__title'
+                'a.yt-lockup-metadata-view-model-wiz__title',
+                'a.ytLockupMetadataViewModelTitle'
             ].join(', '),
 
             contentImageLink: [
@@ -63,7 +64,8 @@
             titleSpan: [
                 '.yt-lockup-metadata-view-model__title span.yt-core-attributed-string',
                 '.yt-lockup-metadata-view-model-wiz__title span.yt-core-attributed-string',
-                '.yt-lockup-metadata-view-model__heading-reset [role="text"]'
+                '.yt-lockup-metadata-view-model__heading-reset [role="text"]',
+                '.ytLockupMetadataViewModelTitle span.yt-core-attributed-string'
             ].join(', '),
 
             metadataContainer: [
@@ -94,10 +96,10 @@
         autoplayToggle: '.ytp-autonav-toggle-button-container .ytp-autonav-toggle-button',
         nextButton: '.ytp-next-button[aria-disabled="false"]',
 
-        endscreenItem: '.html5-endscreen .ytp-videowall-still',
-        endscreenTitle: '.ytp-videowall-still-info-title',
-        endscreenAuthor: '.ytp-videowall-still-info-author',
-        endscreenDuration: '.ytp-videowall-still-info-duration'
+        endscreenItem: '.html5-endscreen .ytp-videowall-still, .html5-endscreen .ytp-modern-videowall-still',
+        endscreenTitle: '.ytp-videowall-still-info-title, .ytp-modern-videowall-still-info-title',
+        endscreenAuthor: '.ytp-videowall-still-info-author, .ytp-modern-videowall-still-info-author',
+        endscreenViewsDate: '.ytp-modern-videowall-still-view-count-and-date-info'
     };
 
     const EVENTS_TO_BLOCK = [
@@ -401,7 +403,9 @@
               item.querySelector(SELECTORS.modern.contentImageLink);
 
         const titleSpan = item.querySelector(SELECTORS.modern.titleSpan);
-        const heading = item.querySelector('.yt-lockup-metadata-view-model__heading-reset');
+        const heading =
+              item.querySelector('.yt-lockup-metadata-view-model__heading-reset') ||
+              item.querySelector('.ytLockupMetadataViewModelHeadingReset');
 
         const title =
               titleSpan?.textContent?.trim() ||
@@ -452,23 +456,40 @@
 
     function parseViewsSimple(v){ return parseViews(v); }
     function getEndscreenData(node){
-        const url=node.getAttribute('href')||'';
-        const title=node.querySelector(SELECTORS.endscreenTitle)?.textContent.trim()||'';
-        const author=node.querySelector(SELECTORS.endscreenAuthor)?.textContent.trim()||'';
-        const durText=node.querySelector(SELECTORS.endscreenDuration)?.textContent.trim()||'0:00';
-        const [channel, viewsStr]=author.split('•').map(s=>s.trim());
-        return { url, title, channel:channel||'', views:parseViewsSimple(viewsStr||''), duration:parseDuration(durText) };
+        const url = node.getAttribute('href') || '';
+        const title = node.querySelector(SELECTORS.endscreenTitle)?.textContent.trim() || '';
+        const author = node.querySelector(SELECTORS.endscreenAuthor)?.textContent.trim() || '';
+        const durText = node.querySelector(SELECTORS.endscreenDuration)?.textContent.trim() || '0:00';
+        const viewsDate = node.querySelector(SELECTORS.endscreenViewsDate)?.textContent.trim() || '';
+
+        return {
+            url,
+            title,
+            channel: author,
+            views: parseViewsSimple(viewsDate),
+            duration: parseDuration(durText)
+        };
     }
 
     function fallbackToNextButton(){
-        const btn=document.querySelector(SELECTORS.nextButton);
-        if(!btn){ console.log("[AutoShort] No next button"); return; }
+        const btn = document.querySelector(SELECTORS.nextButton);
+        if(!btn){
+            console.log("[AutoShort] No next button");
+            return;
+        }
+        console.log("[AutoShort] Clicking NEXT button");
         btn.click();
     }
 
     function pickVideoFromEndscreen(){
         const items = document.querySelectorAll(SELECTORS.endscreenItem);
-        if(!items.length){ fallbackToNextButton(); return; }
+        console.log("[AutoShort] Endscreen items:", items.length);
+
+        if(!items.length){
+            console.log("[AutoShort] No endscreen items -> fallback NEXT");
+            fallbackToNextButton();
+            return;
+        }
 
         const currentLang = getCurrentVideoLanguage();
         const candidates = [];
