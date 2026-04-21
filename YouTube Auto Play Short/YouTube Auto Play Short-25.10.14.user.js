@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         YouTube Auto Play Short
-// @version      26.04.08
+// @version      26.04.21
 // @description  Automatically pick and play short, high‑view videos (with optional language matching) when a video ends, falling back to endscreen if sidebar fails.
 // @match        *://www.youtube.com/*
 // @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short-25.10.14.user.js
@@ -426,18 +426,17 @@
             .filter(Boolean);
 
             for (const txt of parts) {
-                if (!views && /(การดู|views?|ครั้ง)/i.test(txt)) {
+                if (/แสดงครั้งแรกเมื่อวันที่|พรีเมียร์|premiering|เร็วๆ นี้/i.test(txt)) {
+                    continue;
+                }
+
+                if (!views && /(การดู|views?\b)/i.test(txt)) {
                     views = parseViews(txt);
                 }
-                if (!age && /(ปี|เดือน|สัปดาห์|วัน|ชั่วโมง|นาที|วันนี้|ใหม่|year|month|week|day|hour|min)/i.test(txt)) {
+
+                if (!age && /(ปี|เดือน|สัปดาห์|วัน|ชั่วโมง|นาที|วันนี้|ใหม่|year|month|week|day|hour|min|สตรีมแล้วเมื่อ)/i.test(txt)) {
                     age = parseUploadAge(txt);
                 }
-            }
-
-            if ((!views || !age) && parts.length === 0) {
-                const txt = row.textContent.trim();
-                if (!views && /(การดู|views?|ครั้ง)/i.test(txt)) views = parseViews(txt);
-                if (!age && /(ปี|เดือน|สัปดาห์|วัน|ชั่วโมง|นาที|วันนี้|ใหม่|year|month|week|day|hour|min)/i.test(txt)) age = parseUploadAge(txt);
             }
         }
 
