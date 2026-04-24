@@ -6,6 +6,8 @@
 // @author       ChatGPT
 // @match        https://www.youtube.com/*
 // @icon         https://www.youtube.com/favicon.ico
+// @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Personal%20Playlist%20URL%20Exporter%20(.txt)/YouTube%20Playlist%20URL%20Exporter%20(.txt).user.js
+// @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Personal%20Playlist%20URL%20Exporter%20(.txt)/YouTube%20Playlist%20URL%20Exporter%20(.txt).user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
