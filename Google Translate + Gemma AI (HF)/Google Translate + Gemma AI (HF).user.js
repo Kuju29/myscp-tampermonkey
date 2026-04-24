@@ -6,8 +6,8 @@
 // @author       OpenAI
 // @match        https://translate.google.com/*
 // @match        https://translate.google.co.th/*
-// @updateURL    https://github.com/Kuju29/myscp-tampermonkey/blob/main/Google%20Translate%20%2B%20Gemma%20AI%20(HF)/Google%20Translate%20%2B%20Gemma%20AI%20(HF).user.js
-// @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/blob/main/Google%20Translate%20%2B%20Gemma%20AI%20(HF)/Google%20Translate%20%2B%20Gemma%20AI%20(HF).user.js
+// @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/Google%20Translate%20%2B%20Gemma%20AI%20(HF)/Google%20Translate%20%2B%20Gemma%20AI%20(HF).user.js
+// @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/Google%20Translate%20%2B%20Gemma%20AI%20(HF)/Google%20Translate%20%2B%20Gemma%20AI%20(HF).user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
