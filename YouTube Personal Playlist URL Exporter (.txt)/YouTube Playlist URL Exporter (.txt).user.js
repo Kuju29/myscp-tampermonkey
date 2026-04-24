@@ -259,7 +259,10 @@
                 }
 
                 const playlistName = sanitizeFileName(getPlaylistName(panel));
-                downloadTxt(`${playlistName}.txt`, urls.join('\n'));
+                const exportDate = getExportDateString();
+                const fileName = sanitizeFileName(`${playlistName} ${exportDate}`);
+
+                downloadTxt(`${fileName}.txt`, urls.join('\n'));
             } catch (err) {
                 console.error('[YT Playlist Exporter]', err);
             } finally {
@@ -268,6 +271,16 @@
         }, true);
 
         return button;
+    }
+
+    function getExportDateString() {
+        const now = new Date();
+        const day = String(now.getDate()).padStart(2, '0');
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+
+        const buddhistYear2 = String((now.getFullYear() + 543) % 100).padStart(2, '0');
+
+        return `${day}-${month}-${buddhistYear2}`;
     }
 
     function syncButtonLook(button, referenceButton) {
