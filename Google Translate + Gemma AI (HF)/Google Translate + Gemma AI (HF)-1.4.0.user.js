@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Translate + Gemma AI (HF)
 // @namespace    https://openai.com/
-// @version      1.4.0
+// @version      1.5.1
 // @description  แทรกคำแปลจาก AI (google/gemma-3-27b-it ผ่าน Hugging Face) ไว้ใต้คำแปลของ Google Translate ในกล่องเดียวกัน
 // @author       OpenAI
 // @match        https://translate.google.com/*
@@ -25,6 +25,20 @@
 
     const KEY_TOKEN = 'hf_token';
     const KEY_ENABLED = 'ai_enabled';
+    const KEY_SYSTEM_PROMPT = 'ai_system_prompt';
+
+    const DEFAULT_SYSTEM_PROMPT = `You are a highly skilled multilingual translator with native-level fluency across languages. You understand nuance, tone, idioms, slang, cultural context, politeness levels, and natural phrasing in both the source and target languages.
+
+Translate the user’s text into the target language in a way that sounds natural, fluent, and native-like, not literal or word-for-word. Preserve the original meaning, intent, tone, emotion, register, formatting, punctuation style, and line breaks.
+
+Adapt idioms, slang, jokes, cultural references, and expressions into natural equivalents in the target language when appropriate. If a phrase should remain unchanged, such as a name, brand, technical term, URL, code, command, or placeholder, keep it unchanged.
+
+Use the most natural wording that a native speaker of the target language would actually say or write. Avoid robotic, overly literal, awkward, or machine-translated phrasing.
+
+Do not add explanations, notes, alternatives, quotation marks, or extra commentary. Return only the final translated text.`;
+
+    const DEFAULT_USER_PROMPT =
+        'Translate the following text from {{sourceLang}} to {{targetLang}}. Output only the translation text.\n\n{{text}}';
 
     const AI_BOX_ID = 'tm-gemma-ai-box';
     const AI_MODAL_ID = 'tm-gemma-settings-modal';
@@ -272,7 +286,8 @@
     }
 
     #${AI_MODAL_ID} input[type="password"],
-    #${AI_MODAL_ID} input[type="text"] {
+    #${AI_MODAL_ID} input[type="text"],
+    #${AI_MODAL_ID} textarea {
       width: 100%;
       box-sizing: border-box;
       border: 1px solid rgba(60,64,67,.25);
@@ -283,9 +298,18 @@
     }
 
     #${AI_MODAL_ID} input[type="password"]:focus,
-    #${AI_MODAL_ID} input[type="text"]:focus {
+    #${AI_MODAL_ID} input[type="text"]:focus,
+    #${AI_MODAL_ID} textarea:focus {
       border-color: #1a73e8;
       box-shadow: 0 0 0 3px rgba(26,115,232,.12);
+    }
+
+    #${AI_MODAL_ID} textarea {
+      width: 100%;
+      min-height: 92px;
+      resize: vertical;
+      line-height: 1.45;
+      font-family: Roboto, Arial, sans-serif;
     }
 
     #${AI_MODAL_ID} .tm-gemma-check {
@@ -372,6 +396,18 @@
 
     function setToken(value) {
         GM_setValue(KEY_TOKEN, String(value || '').trim());
+    }
+
+    function getSystemPrompt() {
+        return String(GM_getValue(KEY_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT) || DEFAULT_SYSTEM_PROMPT);
+    }
+
+    function setSystemPrompt(value) {
+        GM_setValue(KEY_SYSTEM_PROMPT, String(value || '').trim() || DEFAULT_SYSTEM_PROMPT);
+    }
+
+    function resetPrompts() {
+        setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
     }
 
     function debounce(fn, wait) {
@@ -705,6 +741,20 @@
             placeholder: 'hf_...'
         });
 
+        const systemPromptLabel = el('label', {
+            for: 'tm-gemma-system-prompt',
+            text: 'System prompt'
+        });
+        const systemPromptInput = el('textarea', {
+            id: 'tm-gemma-system-prompt',
+            placeholder: DEFAULT_SYSTEM_PROMPT,
+            rows: '4'
+        });
+
+        const promptHint = el('p', {
+            text: 'แก้ได้เฉพาะ System prompt เท่านั้น — ระบบจะจำค่าไว้หลังปิดเบราว์เซอร์'
+        });
+
         const checkLabel = el('label', { class: 'tm-gemma-check' });
         const enabledInput = el('input', {
             id: 'tm-gemma-enabled',
@@ -725,6 +775,12 @@
             id: 'tm-gemma-clear',
             text: 'ล้างคีย์'
         });
+        const resetPromptBtn = el('button', {
+            type: 'button',
+            class: 'tm-gemma-btn',
+            id: 'tm-gemma-reset-prompt',
+            text: 'รีเซ็ต System prompt'
+        });
         const closeBtn = el('button', {
             type: 'button',
             class: 'tm-gemma-btn',
@@ -737,9 +793,21 @@
             id: 'tm-gemma-save',
             text: 'บันทึก'
         });
-        row.append(clearBtn, closeBtn, saveBtn);
+        row.append(clearBtn, resetPromptBtn, closeBtn, saveBtn);
 
-        card.append(title, desc1, desc2, tokenLabel, tokenInput, checkLabel, status, row);
+        card.append(
+            title,
+            desc1,
+            desc2,
+            tokenLabel,
+            tokenInput,
+            systemPromptLabel,
+            systemPromptInput,
+            promptHint,
+            checkLabel,
+            status,
+            row
+        );
         modal.appendChild(card);
 
         modal.addEventListener('click', (event) => {
@@ -762,7 +830,17 @@
             const enabled = enabledInput.checked;
             setToken(token);
             setEnabled(enabled);
+            setSystemPrompt(systemPromptInput.value);
             setSettingsStatus(token ? 'บันทึกแล้ว' : 'บันทึกแล้ว (ยังไม่มีคีย์)');
+            cache.clear();
+            scheduleRefresh(true);
+        });
+
+        resetPromptBtn.addEventListener('click', () => {
+            resetPrompts();
+            systemPromptInput.value = getSystemPrompt();
+            setSettingsStatus('รีเซ็ต System prompt แล้ว');
+            cache.clear();
             scheduleRefresh(true);
         });
 
@@ -778,6 +856,7 @@
         const modal = ensureSettingsModal();
         qs('#tm-gemma-token', modal).value = getToken();
         qs('#tm-gemma-enabled', modal).checked = getEnabled();
+        qs('#tm-gemma-system-prompt', modal).value = getSystemPrompt();
         setSettingsStatus('');
         modal.classList.add('show');
     }
@@ -910,19 +989,26 @@
         }
     }
 
-    function buildMessages(sourceText, sl, tl) {
+    function renderUserPrompt(sourceText, sl, tl) {
         const sourceLabel = sl === 'auto' ? 'the detected source language' : sl;
         const targetLabel = tl === 'auto' ? 'the selected target language' : tl;
 
+        return DEFAULT_USER_PROMPT
+            .replaceAll('{{sourceLang}}', sourceLabel)
+            .replaceAll('{{targetLang}}', targetLabel)
+            .replaceAll('{{text}}', sourceText);
+    }
+
+    function buildMessages(sourceText, sl, tl) {
         return [
             {
                 role: 'system',
-                content: 'You are a translation engine. Return only the translation text. Do not explain. Do not add notes. Preserve line breaks.'
+                content: getSystemPrompt()
             },
             {
                 role: 'user',
-                content: `Translate the following text from ${sourceLabel} to ${targetLabel}. Output only the translation text.\n\n${sourceText}`
-      }
+                content: renderUserPrompt(sourceText, sl, tl)
+            }
         ];
     }
 
@@ -1022,9 +1108,7 @@
     }
 
     async function translateWithClassic(sourceText, sl, tl) {
-        const sourceLabel = sl === 'auto' ? 'the detected source language' : sl;
-        const targetLabel = tl === 'auto' ? 'the selected target language' : tl;
-        const prompt = `Translate the following text from ${sourceLabel} to ${targetLabel}. Output only the translation text.\n\n${sourceText}`;
+        const prompt = `${getSystemPrompt()}\n\n${renderUserPrompt(sourceText, sl, tl)}`;
 
         const payload = {
             inputs: prompt,
