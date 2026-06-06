@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         YouTube Auto Play Short
-// @version      26.04.21
+// @version      26.06.06
 // @description  Automatically pick and play short, high‑view videos (with optional language matching) when a video ends, falling back to endscreen if sidebar fails.
 // @match        *://www.youtube.com/*
-// @icon         https://www.youtube.com/favicon.ico
 // @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short.user.js
 // @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short.user.js
 // @grant        GM_registerMenuCommand
@@ -33,74 +32,133 @@
 
     const STORAGE_KEYS = { playedIds: "playedVideoIds" };
 
+    const selectorList = (...items) => items.filter(Boolean).join(', ');
+
     const SELECTORS = {
         settingsPanel: '#settings-panel',
 
-        videoTitle: [
+        videoTitle: selectorList(
             'h1.ytd-watch-metadata',
+            '#title h1 yt-formatted-string',
             '#container > h1 > yt-formatted-string',
-            'h1.title.ytd-watch-metadata'
-        ].join(', '),
+            'h1.title.ytd-watch-metadata',
+            'h1 [role="text"]',
+            'h1'
+        ),
 
-        sidebarItems: [
-            'yt-lockup-view-model-wiz',
+        // Keep the search scoped to the watch-page sidebar first.
+        // YouTube often changes exact class names, but these host tags/ids are much more stable.
+        sidebarItems: selectorList(
+            'ytd-watch-next-secondary-results-renderer yt-lockup-view-model',
+            '#secondary yt-lockup-view-model',
+            '#related yt-lockup-view-model',
+            'ytd-watch-next-secondary-results-renderer ytd-compact-video-renderer',
+            '#secondary ytd-compact-video-renderer',
+            '#related ytd-compact-video-renderer',
+            'ytd-watch-next-secondary-results-renderer ytd-compact-playlist-renderer',
+            '#secondary ytd-compact-playlist-renderer',
+            '#related ytd-compact-playlist-renderer'
+        ),
+
+        // Last resort only. Used when YouTube moves the sidebar outside the old containers.
+        fallbackItems: selectorList(
             'yt-lockup-view-model',
-            'yt-lockup-view-model.ytd-item-section-renderer',
             'ytd-compact-video-renderer',
             'ytd-compact-playlist-renderer'
-        ].join(', '),
+        ),
 
         modern: {
-            titleLink: [
-                'a.yt-lockup-metadata-view-model__title',
-                'a.yt-lockup-metadata-view-model-wiz__title',
-                'a.ytLockupMetadataViewModelTitle'
-            ].join(', '),
+            titleLink: selectorList(
+                'a.ytLockupMetadataViewModelTitle[href*="/watch"]',
+                'a.yt-lockup-metadata-view-model__title[href*="/watch"]',
+                'a.yt-lockup-metadata-view-model-wiz__title[href*="/watch"]',
+                'a[class*="LockupMetadata"][class*="Title"][href*="/watch"]',
+                'a[class*="lockup-metadata"][class*="title"][href*="/watch"]',
+                'h3 a[href*="/watch?v="]',
+                'a[aria-label][href*="/watch?v="]'
+            ),
 
-            contentImageLink: [
-                'a.yt-lockup-view-model__content-image',
-                'a.yt-lockup-view-model-wiz__content-image'
-            ].join(', '),
+            contentImageLink: selectorList(
+                'a.ytLockupViewModelContentImage[href*="/watch"]',
+                'a.yt-lockup-view-model__content-image[href*="/watch"]',
+                'a.yt-lockup-view-model-wiz__content-image[href*="/watch"]',
+                'a[class*="LockupViewModelContentImage"][href*="/watch"]',
+                'a[class*="content-image"][href*="/watch"]',
+                'a[href*="/watch?v="]'
+            ),
 
-            titleSpan: [
+            titleSpan: selectorList(
+                '.ytLockupMetadataViewModelTitle [role="text"]',
+                '.ytLockupMetadataViewModelTitle span',
                 '.yt-lockup-metadata-view-model__title span.yt-core-attributed-string',
                 '.yt-lockup-metadata-view-model-wiz__title span.yt-core-attributed-string',
                 '.yt-lockup-metadata-view-model__heading-reset [role="text"]',
-                '.ytLockupMetadataViewModelTitle span.yt-core-attributed-string'
-            ].join(', '),
+                '[class*="LockupMetadata"][class*="Title"] [role="text"]',
+                '[class*="LockupMetadata"][class*="Title"] span',
+                '[class*="lockup-metadata"][class*="title"] [role="text"]'
+            ),
 
-            metadataContainer: [
+            heading: selectorList(
+                '.ytLockupMetadataViewModelHeadingReset',
+                '.yt-lockup-metadata-view-model__heading-reset',
+                '[class*="LockupMetadata"][class*="HeadingReset"]',
+                'h3[title]',
+                'h3'
+            ),
+
+            metadataContainer: selectorList(
+                '.ytLockupMetadataViewModelMetadata',
                 '.yt-lockup-view-model-wiz__metadata',
                 '.yt-lockup-metadata-view-model__metadata',
                 '.yt-lockup-metadata-view-model-wiz__metadata',
-                '.yt-lockup-view-model__metadata'
-            ].join(', '),
+                '.yt-lockup-view-model__metadata',
+                '[class*="LockupMetadata"][class*="Metadata"]',
+                '[class*="metadata"]'
+            ),
 
-            metadataRow: [
+            metadataRow: selectorList(
+                '.ytContentMetadataViewModelMetadataRow',
                 '.yt-content-metadata-view-model__metadata-row',
                 '.yt-content-metadata-view-model-wiz__metadata-row',
-                '.ytContentMetadataViewModelMetadataRow'
-            ].join(', '),
+                '[class*="ContentMetadata"][class*="MetadataRow"]',
+                '[class*="metadata-row"]'
+            ),
 
-            badgeDuration: [
-                '.yt-thumbnail-bottom-overlay-view-model .badge-shape-wiz__text',
+            metadataText: selectorList(
+                '.ytContentMetadataViewModelMetadataText',
+                '[class*="ContentMetadata"][class*="MetadataText"]',
+                '[class*="metadata-text"]',
+                'span[role="text"]',
+                'span'
+            ),
+
+            badgeDuration: selectorList(
+                '.ytBadgeShapeText',
                 '.yt-badge-shape__text',
-                '.badge-shape__text'
-            ].join(', '),
+                '.badge-shape__text',
+                '.badge-shape-wiz__text',
+                '.yt-thumbnail-bottom-overlay-view-model .badge-shape-wiz__text',
+                '[class*="BadgeShapeText"]',
+                '[class*="badge"][class*="text"]',
+                '[class*="Badge"][class*="Text"]'
+            ),
 
-            watchedBar: [
+            watchedBar: selectorList(
                 '.ytThumbnailOverlayProgressBarHostWatchedProgressBarHostWatchedProgressBarSegment',
-                '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment'
-            ].join(', ')
+                '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment',
+                '[class*="ProgressBar"][class*="Watched"]',
+                '[class*="progress"][class*="watched"]'
+            )
         },
 
-        autoplayToggle: '.ytp-autonav-toggle-button-container .ytp-autonav-toggle-button',
+        autoplayToggle: '.ytp-autonav-toggle-button-container .ytp-autonav-toggle-button, .ytp-autonav-toggle-button',
         nextButton: '.ytp-next-button[aria-disabled="false"]',
 
         endscreenItem: '.html5-endscreen .ytp-videowall-still, .html5-endscreen .ytp-modern-videowall-still',
         endscreenTitle: '.ytp-videowall-still-info-title, .ytp-modern-videowall-still-info-title',
         endscreenAuthor: '.ytp-videowall-still-info-author, .ytp-modern-videowall-still-info-author',
-        endscreenViewsDate: '.ytp-modern-videowall-still-view-count-and-date-info'
+        endscreenDuration: '.ytp-videowall-still-info-duration, .ytp-modern-videowall-still-info-duration, .ytp-videowall-still-info-length, .ytp-modern-videowall-still-info-length',
+        endscreenViewsDate: '.ytp-modern-videowall-still-view-count-and-date-info, .ytp-videowall-still-info-live, .ytp-videowall-still-info-author + div'
     };
 
     const EVENTS_TO_BLOCK = [
@@ -241,7 +299,22 @@
 
     const safeDefine=(o,k,d)=>{try{Object.defineProperty(o,k,d);}catch(e){}};
 
-    function getVideoIdFromUrl(url){ const m=url.match(REGEX.videoId); return m?m[1]:null; }
+    function getVideoIdFromUrl(url){
+        if (!url) return null;
+        try {
+            const u = new URL(url, location.origin);
+            const fromQuery = u.searchParams.get('v');
+            if (fromQuery) return fromQuery;
+            const shorts = u.pathname.match(/\/shorts\/([^/?#]+)/);
+            if (shorts) return shorts[1];
+            const embed = u.pathname.match(/\/embed\/([^/?#]+)/);
+            if (embed) return embed[1];
+        } catch(e) {
+            const m = String(url).match(REGEX.videoId);
+            if (m) return m[1];
+        }
+        return null;
+    }
 
     function parseDuration(str){
         if(!str) return 0;
@@ -366,88 +439,147 @@
 
     function parseViews(text){
         if(!text) return 0;
-        let t=text.replace(/,/g,'').trim();
-        t=t.replace(/การดู/g,'').replace(/ครั้ง/g,'').replace(/views?/ig,'').trim();
+        let t = String(text)
+            .replace(/\u00a0/g, ' ')
+            .replace(/,/g, '')
+            .replace(/การดู/g, '')
+            .replace(/ครั้ง/g, '')
+            .replace(/views?/ig, '')
+            .trim();
 
-        let factor=1;
-        if (/แสน/.test(t)) { factor=100000; t=t.replace(/แสน/,'').trim(); }
-        else if (/หมื่น/.test(t)) { factor=10000; t=t.replace(/หมื่น/,'').trim(); }
-        else if (/พันล้าน/.test(t)) { factor=1e9; t=t.replace(/พันล้าน/,'').trim(); }
-        else if (/ล้าน/.test(t)) { factor=1e6; t=t.replace(/ล้าน/,'').trim(); }
-        else if (/พัน/.test(t)) { factor=1e3; t=t.replace(/พัน/,'').trim(); }
+        // Prefer a number that is directly attached to a view unit. This prevents
+        // "7.5 ล้าน 3 ปีที่แล้ว" from becoming 75,300,000 by accident.
+        let m = t.match(/(\d+(?:\.\d+)?)\s*(พันล้าน|ล้าน|แสน|หมื่น|พัน|[kmb])/i);
+        let numText = m?.[1];
+        let unit = m?.[2] || '';
 
-        if (/b$/i.test(t)) { factor=1e9; t=t.replace(/b$/i,''); }
-        else if (/m$/i.test(t)) { factor=1e6; t=t.replace(/m$/i,''); }
-        else if (/k$/i.test(t)) { factor=1e3; t=t.replace(/k$/i,''); }
+        if (!numText) {
+            m = t.match(/(\d+(?:\.\d+)?)/);
+            numText = m?.[1];
+        }
 
-        const num=parseFloat(t.replace(/[^\d\.]/g,''));
+        const num = parseFloat(numText || '');
         if(!isFinite(num)) return 0;
-        return Math.round(num*factor);
+
+        let factor = 1;
+        unit = String(unit).toLowerCase();
+        if (unit === 'พันล้าน' || unit === 'b') factor = 1e9;
+        else if (unit === 'ล้าน' || unit === 'm') factor = 1e6;
+        else if (unit === 'แสน') factor = 100000;
+        else if (unit === 'หมื่น') factor = 10000;
+        else if (unit === 'พัน' || unit === 'k') factor = 1e3;
+
+        return Math.round(num * factor);
+    }
+
+    function isAgeText(text){
+        return /(ปี|เดือน|สัปดาห์|สัปดา|วัน|ชั่วโมง|ชม\.?|นาที|วิ(?:นาที)?|ที่แล้ว|วันนี้|ใหม่\b|year|month|week|day|hour|hr\b|minute|min\b|second|sec\b|ago|streamed)/i.test(String(text || ''));
+    }
+
+    function isDurationText(text){
+        return /^\s*\d{1,3}:\d{2}(?::\d{2})?\s*$/.test(String(text || ''));
+    }
+
+    function isLikelyViewsText(text){
+        const t = String(text || '').trim();
+        if (!/\d/.test(t)) return false;
+        if (isDurationText(t) || isAgeText(t)) return false;
+        return /(การดู|views?\b|ล้าน|แสน|หมื่น|พัน|\b[kmb]\b)/i.test(t) || /^\d+(?:[.,]\d+)?$/.test(t);
+    }
+
+    function getTextParts(root, selector='span'){
+        return Array.from(root?.querySelectorAll?.(selector) || [])
+            .map(el => el.textContent?.trim())
+            .filter(Boolean);
+    }
+
+    function findDurationText(root){
+        const parts = getTextParts(root, SELECTORS.modern.badgeDuration)
+            .concat(getTextParts(root, '[aria-label]'));
+        return parts.find(isDurationText) || '';
+    }
+
+    function findBestWatchLink(item){
+        const selectors = [
+            SELECTORS.modern.titleLink,
+            SELECTORS.modern.contentImageLink,
+            'a[aria-label][href*="/watch"]',
+            'a[href*="/watch?v="]',
+            'a[href*="/shorts/"]'
+        ];
+
+        for (const sel of selectors) {
+            const links = Array.from(item.querySelectorAll(sel));
+            const link = links.find(a => getVideoIdFromUrl(a.getAttribute('href') || a.href));
+            if (link) return link;
+        }
+        return null;
     }
 
     function parseUploadAge(text){
         if(!text) return 0;
-        const t=text.toLowerCase().trim();
-        if (/(อัปเดตแล้ววันนี้|วันนี้|ใหม่\b)/.test(t)) return 0;
-        const mYear=t.match(REGEX.ageYear); if(mYear) return +mYear[1];
-        const mMonth=t.match(REGEX.ageMonth); if(mMonth) return Math.floor(+mMonth[1]/12);
-        const mWeek=t.match(REGEX.ageWeek); if(mWeek) return Math.floor(+mWeek[1]/52);
-        const mDay=t.match(REGEX.ageDay); if(mDay) return Math.floor(+mDay[1]/365);
-        const mHour=t.match(REGEX.ageHour); if(mHour) return 0;
-        const mMin=t.match(REGEX.ageMinute); if(mMin) return 0;
+        const t = String(text).toLowerCase().trim();
+        if (/(อัปเดตแล้ววันนี้|วันนี้|ใหม่\b|just now|moments ago)/i.test(t)) return 0;
+
+        let m = t.match(/(\d+)\s*(ปี|years?|yr\b)/i); if(m) return +m[1];
+        m = t.match(/(\d+)\s*(เดือน|months?|mo\b)/i); if(m) return Math.floor(+m[1] / 12);
+        m = t.match(/(\d+)\s*(สัปดาห์|สัปดา|weeks?|wk\b)/i); if(m) return Math.floor(+m[1] / 52);
+        m = t.match(/(\d+)\s*(วัน|days?)/i); if(m) return Math.floor(+m[1] / 365);
+        m = t.match(/(\d+)\s*(ชั่วโมง|ชม\.?|hours?|hrs?|hr\b)/i); if(m) return 0;
+        m = t.match(/(\d+)\s*(นาที|minutes?|mins?|min\b)/i); if(m) return 0;
+        m = t.match(/(\d+)\s*(วินาที|seconds?|secs?|sec\b)/i); if(m) return 0;
         return 0;
     }
 
     function getVideoInfo(item){
-        const titleLink =
-              item.querySelector(SELECTORS.modern.titleLink) ||
-              item.querySelector(SELECTORS.modern.contentImageLink);
-
+        const titleLink = findBestWatchLink(item);
         const titleSpan = item.querySelector(SELECTORS.modern.titleSpan);
-        const heading =
-              item.querySelector('.yt-lockup-metadata-view-model__heading-reset') ||
-              item.querySelector('.ytLockupMetadataViewModelHeadingReset');
+        const heading = item.querySelector(SELECTORS.modern.heading);
 
         const title =
               titleSpan?.textContent?.trim() ||
               heading?.getAttribute?.('title') ||
+              heading?.textContent?.trim() ||
               titleLink?.getAttribute?.('title') ||
               titleLink?.getAttribute?.('aria-label') ||
               titleLink?.textContent?.trim() ||
               '';
 
         const rows = Array.from(item.querySelectorAll(SELECTORS.modern.metadataRow));
+        const metadataNodes = rows.length ? rows : Array.from(item.querySelectorAll(SELECTORS.modern.metadataContainer));
 
         let views = 0;
         let age = 0;
 
-        for (const row of rows) {
-            const parts = Array.from(row.querySelectorAll('span'))
-            .map(el => el.textContent?.trim())
-            .filter(Boolean);
+        for (const row of metadataNodes) {
+            const parts = getTextParts(row, SELECTORS.modern.metadataText);
+            const rowText = row.textContent?.trim() || '';
+            if (!parts.length && rowText) parts.push(rowText);
 
-            for (const txt of parts) {
-                if (/แสดงครั้งแรกเมื่อวันที่|พรีเมียร์|premiering|เร็วๆ นี้/i.test(txt)) {
-                    continue;
-                }
+            const ageIndex = parts.findIndex(txt => isAgeText(txt));
+            if (!age && ageIndex >= 0) age = parseUploadAge(parts[ageIndex]);
 
-                if (!views && /(การดู|views?\b)/i.test(txt)) {
-                    views = parseViews(txt);
-                }
+            if (!views) {
+                // New YouTube TH UI often shows only "7.5 ล้าน" without "การดู".
+                // In metadata rows, view count usually appears right before the age text.
+                const beforeAge = ageIndex >= 0 ? parts.slice(0, ageIndex).reverse() : [];
+                const viewText = beforeAge.find(isLikelyViewsText) || parts.find(txt => /(การดู|views?\b)/i.test(txt));
+                if (viewText) views = parseViews(viewText);
+            }
 
-                if (!age && /(ปี|เดือน|สัปดาห์|วัน|ชั่วโมง|นาที|วันนี้|ใหม่|year|month|week|day|hour|min|สตรีมแล้วเมื่อ)/i.test(txt)) {
-                    age = parseUploadAge(txt);
-                }
+            // Fallback for collapsed row text such as "7.5 ล้าน 3 ปีที่แล้ว".
+            if (!views && isAgeText(rowText) && /\d/.test(rowText)) {
+                views = parseViews(rowText);
             }
         }
 
-        const durationText = item.querySelector(SELECTORS.modern.badgeDuration)?.textContent?.trim() || '';
+        const durationText = findDurationText(item);
         const duration = parseDuration(durationText) || extractDurationFallbackFromAria(titleLink);
 
         const progress = !!item.querySelector(SELECTORS.modern.watchedBar);
-        const href = titleLink?.getAttribute('href') || '';
+        const href = titleLink?.getAttribute('href') || titleLink?.href || '';
 
-        return { title, views, age, duration, progress, href };
+        return { title, views, age, duration, progress, href, element: titleLink };
     }
 
     /* =========================
@@ -456,11 +588,16 @@
 
     function parseViewsSimple(v){ return parseViews(v); }
     function getEndscreenData(node){
-        const url = node.getAttribute('href') || '';
-        const title = node.querySelector(SELECTORS.endscreenTitle)?.textContent.trim() || '';
+        const url = node.getAttribute('href') || node.querySelector?.('a[href]')?.getAttribute('href') || '';
+        const title = node.querySelector(SELECTORS.endscreenTitle)?.textContent.trim()
+              || node.getAttribute('aria-label')
+              || node.getAttribute('title')
+              || '';
         const author = node.querySelector(SELECTORS.endscreenAuthor)?.textContent.trim() || '';
-        const durText = node.querySelector(SELECTORS.endscreenDuration)?.textContent.trim() || '0:00';
-        const viewsDate = node.querySelector(SELECTORS.endscreenViewsDate)?.textContent.trim() || '';
+        const durText = node.querySelector(SELECTORS.endscreenDuration)?.textContent.trim()
+              || findDurationText(node)
+              || '0:00';
+        const viewsDate = node.querySelector(SELECTORS.endscreenViewsDate)?.textContent.trim() || node.textContent || '';
 
         return {
             url,
@@ -544,7 +681,11 @@
         if(autoplayBtn.getAttribute('aria-checked')!=='false'){ return; }
         if(location.href.includes('list=')) return; // Skip playlists
 
-        const sidebarItems=Array.from(document.querySelectorAll(SELECTORS.sidebarItems));
+        let sidebarItems=Array.from(document.querySelectorAll(SELECTORS.sidebarItems));
+        if(!sidebarItems.length){
+            sidebarItems = Array.from(document.querySelectorAll(SELECTORS.fallbackItems))
+                .filter(item => item.closest('ytd-watch-next-secondary-results-renderer, #secondary, #related') || document.querySelector('ytd-watch-next-secondary-results-renderer, #secondary, #related') === null);
+        }
         if(!sidebarItems.length){
             console.log("[AutoShort] No sidebar items -> using endscreen");
             pickVideoFromEndscreen(); return;
@@ -563,7 +704,7 @@
                 title: info.title,
                 videoId,
 
-                element: item.querySelector(SELECTORS.modern.titleLink) || item.querySelector(SELECTORS.modern.contentImageLink),
+                element: info.element || findBestWatchLink(item),
                 progress: info.progress
             };
         }).filter(Boolean);
@@ -590,6 +731,7 @@
                                           v.views >= defaultSettings.minViews &&
                                           matchesLanguage(v.lang, currentLang) &&
                                           v.videoId &&
+                                          v.element &&
                                           !playedVideoIds.includes(v.videoId) &&
                                           v.age <= defaultSettings.maxAgeYears
                                          );
