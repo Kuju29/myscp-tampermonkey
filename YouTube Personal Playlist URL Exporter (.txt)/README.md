@@ -55,9 +55,7 @@ Download audio only and convert it to MP3 with the best quality:
 
 ```bash
 yt-dlp -f "ba[ext=m4a]/ba[acodec^=mp4a]/ba" -x --audio-format mp3 --audio-quality 320K -a youfilename.txt
-yt-dlp -f "ba[ext=m4a]/ba[acodec^=mp4a]/ba" -x --audio-format mp3 --audio-quality 320K --postprocessor-args "ExtractAudio+ffmpeg_o:-af loudnorm=I=-16:LRA=11:TP=-1.5" -a youfilename.txt
-yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 0 -a youfilename.txt
-yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 320K --postprocessor-args "ExtractAudio:-af loudnorm=I=-14:LRA=11:TP=-1.5"  -a youfilename.txt
+yt-dlp -f "ba[ext=m4a]/ba[acodec^=mp4a]/ba" -x --audio-format mp3 --audio-quality 320K --exec "after_move:rsgain custom -s i -l -14 -c p %(filepath)q" -a youfilename.txt
 ```
 
 ---
