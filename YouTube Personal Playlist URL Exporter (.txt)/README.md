@@ -57,6 +57,29 @@ Download audio only and convert it to MP3 with the best quality:
 yt-dlp -f "ba[ext=m4a]/ba[acodec^=mp4a]/ba" -x --audio-format mp3 --audio-quality 320K -a youfilename.txt
 yt-dlp -f "ba[ext=m4a]/ba[acodec^=mp4a]/ba" -x --audio-format mp3 --audio-quality 320K --exec "after_move:rsgain custom -s i -l -14 -c p %(filepath)q" -a youfilename.txt
 ```
+```bat
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+
+for %%F in (*.txt) do (
+    echo.
+    echo ================================
+    echo Downloading from: %%~nxF
+    echo Folder: %%~nF
+    echo ================================
+
+    if not exist "%%~nF" mkdir "%%~nF"
+
+    yt-dlp -f "ba[ext=m4a]/ba[acodec^=mp4a]/ba" ^
+      -x --audio-format mp3 --audio-quality 320K ^
+      -P "home:%%~nF" ^
+      -o "%%(title).200B [%%(id)s].%%(ext)s" ^
+      -a "%%~fF"
+)
+
+pause
+```
 
 ---
 
