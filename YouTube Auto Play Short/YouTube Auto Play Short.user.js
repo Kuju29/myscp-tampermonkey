@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         YouTube Auto Play Short
-// @version      26.06.06
+// @version      26.06.21
 // @description  Automatically pick and play short, high‑view videos (with optional language matching) when a video ends, falling back to endscreen if sidebar fails.
 // @match        *://www.youtube.com/*
 // @icon         https://www.youtube.com/favicon.ico
@@ -38,14 +38,18 @@
     const SELECTORS = {
         settingsPanel: '#settings-panel',
 
-        videoTitle: selectorList(
-            'h1.ytd-watch-metadata',
-            '#title h1 yt-formatted-string',
-            '#container > h1 > yt-formatted-string',
-            'h1.title.ytd-watch-metadata',
-            'h1 [role="text"]',
-            'h1'
-        ),
+        // Current watch-page title only. Do not include broad selectors like "h1" here,
+        // because YouTube can render empty miniplayer / hidden headings before the real video title.
+        currentVideoTitleCandidates: [
+            'ytd-watch-metadata #title h1 yt-formatted-string[title]',
+            'ytd-watch-metadata #title h1 yt-formatted-string',
+            'ytd-watch-metadata h1 yt-formatted-string[title]',
+            'ytd-watch-metadata h1 yt-formatted-string',
+            '#above-the-fold #title h1 yt-formatted-string[title]',
+            '#above-the-fold #title h1 yt-formatted-string',
+            'meta[property="og:title"]',
+            'meta[name="title"]'
+        ],
 
         // Keep the search scoped to the watch-page sidebar first.
         // YouTube often changes exact class names, but these host tags/ids are much more stable.
@@ -379,58 +383,89 @@
 
     function pickRandom(a){ if(!a.length) return null; return a[Math.floor(Math.random()*a.length)]; }
 
-    function detectLanguage(text) {
-        if (!defaultSettings.detectLanguage) return 'unknown';
-
-        let t = String(text || '').trim();
-        if (!t) return 'unknown';
-
-        t = t
+    function cleanVideoTitle(text) {
+        return String(text || '')
+            .replace(/\s+-\s+YouTube$/i, '')
             .replace(/【[^】]*】/g, ' ')
             .replace(/\[[^\]]*\]/g, ' ')
             .replace(/\([^)]*\b(?:official|audio|video|mv|lyrics?|ver\.?|version)\b[^)]*\)/ig, ' ')
-            .replace(/\b(?:official|music|video|official music video|mv|lyrics?|audio)\b/ig, ' ')
+            .replace(/\b(?:official|music|video|official music video|mv|lyrics?|audio|sub(?:title)?s?)\b/ig, ' ')
             .replace(/\s+/g, ' ')
             .trim();
+    }
 
-        const segments = t
-        .split(/[-–—|:/]+/)
-        .map(s => s.trim())
-        .filter(Boolean);
+    function getReadableText(el) {
+        if (!el) return '';
+        return (
+            el.getAttribute?.('title') ||
+            el.getAttribute?.('aria-label') ||
+            el.getAttribute?.('content') ||
+            el.textContent ||
+            ''
+        ).trim();
+    }
 
-        for (const seg of segments) {
-            const lao = (seg.match(/[\u0E80-\u0EFF]/g) || []).length;
-            const thai = (seg.match(/[\u0E00-\u0E7F]/g) || []).length;
-            const korean = (seg.match(/[\uAC00-\uD7AF]/g) || []).length;
-            const japanese = (seg.match(/[\u3040-\u30FF]/g) || []).length;
-            const chinese = (seg.match(/[\u4E00-\u9FFF]/g) || []).length;
-
-            const bestNonLatin = [
-                ['lao', lao],
-                ['thai', thai],
-                ['korean', korean],
-                ['japanese', japanese],
-                ['chinese', chinese]
-            ].sort((a, b) => b[1] - a[1])[0];
-
-            if (bestNonLatin[1] > 0) return bestNonLatin[0];
+    function findFirstNonEmptyText(selectors, root = document) {
+        for (const sel of selectors) {
+            const nodes = Array.from(root.querySelectorAll(sel));
+            for (const node of nodes) {
+                const text = getReadableText(node);
+                if (text) return { node, text };
+            }
         }
+        return null;
+    }
+
+    function detectLanguage(text) {
+        if (!defaultSettings.detectLanguage) return 'unknown';
+
+        const t = cleanVideoTitle(text);
+        if (!t) return 'unknown';
+
+        const count = (re) => (t.match(re) || []).length;
+        const thai = count(/[\u0E00-\u0E7F]/g);
+        const lao = count(/[\u0E80-\u0EFF]/g);
+        const korean = count(/[\uAC00-\uD7AF]/g);
+        const japaneseKana = count(/[\u3040-\u30FF]/g);
+        const cjk = count(/[\u4E00-\u9FFF]/g);
+
+        // Thai and Lao ranges are close; choose the larger one if both appear.
+        if (thai || lao) return thai >= lao ? 'thai' : 'lao';
+        if (korean) return 'korean';
+
+        // Japanese music titles often mix Kanji + Hiragana/Katakana.
+        // If Kana exists, treat it as Japanese even when there are more Kanji characters.
+        if (japaneseKana) return 'japanese';
+
+        // Han-only titles can be Chinese, Japanese, or Korean Hanja. Keep this flexible.
+        if (cjk) return 'cjk';
 
         if (/[A-Za-z]/.test(t)) return 'latin';
 
         return 'unknown';
     }
 
-    function getCurrentVideoLanguage() {
-        const el = document.querySelector(SELECTORS.videoTitle)
-        || document.querySelector('#title h1 yt-formatted-string')
-        || document.querySelector('h1 > yt-formatted-string');
+    function getCurrentVideoTitle() {
+        const found = findFirstNonEmptyText(SELECTORS.currentVideoTitleCandidates);
+        let title = found?.text || '';
 
-        if (el) {
-            const t = (el.textContent || '').trim();
-            return detectLanguage(t);
+        // Last fallback: browser tab title, cleaned from " - YouTube".
+        if (!title) title = document.title || '';
+
+        title = cleanVideoTitle(title);
+
+        if (defaultSettings.debugDrops) {
+            console.debug('[AutoShort] Current title:', title || '(empty)', found?.node || '(fallback document.title)');
         }
-        return 'unknown';
+
+        return title;
+    }
+
+    function getCurrentVideoLanguage() {
+        const title = getCurrentVideoTitle();
+        const lang = detectLanguage(title);
+        if (defaultSettings.debugDrops) console.debug('[AutoShort] Current language:', lang, title);
+        return lang;
     }
 
 
@@ -672,7 +707,15 @@
     function matchesLanguage(videoLang, currentLang) {
         if (!defaultSettings.detectLanguage) return true;
         if (currentLang === 'unknown') return true;
-        return videoLang === currentLang;
+        if (videoLang === 'unknown') return false;
+        if (videoLang === currentLang) return true;
+
+        // CJK means Han-only title. It may be Japanese/Chinese, so do not hard-drop it
+        // when the current video is a known CJK language.
+        const cjkFamily = new Set(['cjk', 'japanese', 'chinese']);
+        if (cjkFamily.has(videoLang) && cjkFamily.has(currentLang)) return true;
+
+        return false;
     }
 
     function mainAutoPlay(){
