@@ -5,6 +5,8 @@
 // @description  ฟอนต์ในเครื่อง สี และเงาคำบรรยาย ปรับทิศทาง/ขนาดเงาโดยไม่หมุนข้อความ พร้อม log
 // @match        *://www.youtube.com/*
 // @icon         https://www.youtube.com/favicon.ico
+// @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Local%20Subtitle%20Font/YouTube%20Local%20Subtitle%20Font.user.js
+// @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Local%20Subtitle%20Font/YouTube%20Local%20Subtitle%20Font.user.js
 // @run-at       document-idle
 // @sandbox      JavaScript
 // @noframes
