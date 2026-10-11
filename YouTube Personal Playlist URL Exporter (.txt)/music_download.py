@@ -6,7 +6,9 @@
 รายงาน: _music_reports/ชื่อไฟล์/ ; เพลง: โฟลเดอร์ชื่อเดียวกับไฟล์ .txt
 ไม่แก้ไฟล์ต้นฉบับ คัดแยกในแต่ละหมวด เลือก Lyrics เหนือ MV เมื่อชื่อจับคู่ได้
 ชื่อคล้ายที่ไม่แน่ใจเก็บทั้งคู่และแจ้ง review.csv โปรดตรวจ removed.csv ครั้งแรก
-ตรวจชื่อและดาวน์โหลดหลายงานพร้อมกัน ปรับอัตโนมัติตาม CPU/RAM และข้อผิดพลาด
+ตรวจชื่อผ่าน YouTube oEmbed ก่อน ไม่ต้องดึงข้อมูลสตรีมเต็มทุกเพลง
+ตรวจชื่อและดาวน์โหลดหลายงานพร้อมกัน ปรับตาม CPU/RAM และขีดจำกัดบริการ
+รายการที่ยังดึงชื่อไม่ได้เก็บในรายงาน แต่พักดาวน์โหลดจนตรวจซ้ำได้
 รันคำสั่ง: python music_download.py --scan / --download / --refresh
 กำหนดเพดานเอง: --workers 16 --scan-workers 32 (ยังจำกัดตามทรัพยากรที่ตรวจพบ)
 """
@@ -23,7 +25,10 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from collections import deque
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / '_music_reports'
@@ -54,51 +59,78 @@ def system_limit(stage):
     cpu = os.cpu_count() or 2
     ram = available_memory_gb()
     budget = max(1, int((ram - .75) / (.18 if stage == 'scan' else .35))) if ram is not None else 8
-    return max(1, min(64 if stage == 'scan' else 32, cpu * (4 if stage == 'scan' else 2), budget))
+    return max(1, min(12 if stage == 'scan' else (3 if stage == 'fallback' else 8), cpu * (4 if stage == 'scan' else 2), budget))
 
 def throttled(text):
     return bool(re.search(r'429|too many requests|rate.?limit|confirm you.re not a bot|temporarily blocked', text, re.I))
 
 def adaptive_jobs(items, worker, stage, requested=0):
-    """Bound in-flight processes; increase after success, decrease on pressure/errors."""
-    items = iter(items)
+    queue = deque((item, 0) for item in items)
     ceiling = min(requested, system_limit(stage)) if requested else system_limit(stage)
-    target = min(ceiling, 8 if stage == 'scan' else 4)
-    print(f'{stage}: auto capacity {ceiling}, starting {target} jobs', flush=True)
+    target = min(ceiling, 6 if stage == 'scan' else 2)
+    print(f'{stage}: capacity {ceiling}, starting {target} jobs', flush=True)
     successes = 0
-    exhausted = False
     cooldown_until = 0
+    recovery_until = 0
+    consecutive_limits = 0
     with ThreadPoolExecutor(max_workers=ceiling) as pool:
         pending = {}
-        while pending or not exhausted:
+        while pending or queue:
+            now = time.monotonic()
             target = min(target, system_limit(stage), ceiling)
-            while not exhausted and len(pending) < target and time.monotonic() >= cooldown_until:
-                try: item = next(items)
-                except StopIteration: exhausted = True; break
-                pending[pool.submit(worker, item)] = item
+            while queue and len(pending) < target and now >= cooldown_until:
+                item, attempt = queue.popleft()
+                pending[pool.submit(worker, item)] = (item, attempt)
             if not pending:
-                if exhausted: break
+                if not queue: break
                 time.sleep(min(1, max(0, cooldown_until-time.monotonic())))
                 continue
             done, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
-                pending.pop(future)
+                item, attempt = pending.pop(future)
                 result = future.result()
                 if result.get('throttled'):
-                    target = max(1, target//2)
+                    now = time.monotonic()
+                    # All failures from the already-running batch share one cooldown.
+                    if now >= cooldown_until:
+                        consecutive_limits += 1
+                        target = max(1, target//2)
+                        ceiling = min(ceiling, target)
+                        delay = min(180, 30 * 2**(consecutive_limits-1))
+                        cooldown_until = now + delay
+                        recovery_until = cooldown_until + 120
+                        print(f'{stage}: limit detected; ceiling {ceiling}, cooldown {delay}s; retrying affected jobs', flush=True)
                     successes = 0
-                    cooldown_until = time.monotonic()+15
-                    print(f'{stage}: provider limit detected; reducing to {target}, pausing new jobs 15s', flush=True)
+                    if attempt < 2:
+                        queue.append((item, attempt+1))
+                        continue
                 elif not result.get('ok'):
-                    target = max(1, target-1)
                     successes = 0
+                    if result.get('retryable') and attempt < 2:
+                        queue.append((item, attempt+1))
+                        continue
                 else:
                     successes += 1
-                    if successes >= target and target < min(ceiling, system_limit(stage)):
-                        target = min(ceiling, system_limit(stage), target+max(1,target//4))
+                    if successes >= max(12, target*4) and time.monotonic() >= recovery_until and target < min(ceiling,system_limit(stage)):
+                        target += 1
                         successes = 0
                         print(f'{stage}: increasing to {target} jobs', flush=True)
                 yield result
+
+
+def quick_youtube_metadata(item):
+    key, url = item
+    canonical = 'https://www.youtube.com/watch?v=' + key.split(':',1)[1]
+    endpoint = 'https://www.youtube.com/oembed?' + urlencode({'url':canonical, 'format':'json'})
+    try:
+        with urlopen(Request(endpoint, headers={'User-Agent':'MusicListDownloader/1.0'}), timeout=20) as response:
+            data = json.load(response)
+        if not data.get('title'): raise ValueError('oEmbed response has no title')
+        return {'key':key, 'info':{'id':key.split(':',1)[1], 'title':data['title'], 'source':'oembed'}, 'ok':True}
+    except HTTPError as error:
+        return {'key':key, 'error':str(error), 'ok':False, 'throttled':error.code==429, 'retryable':error.code>=500, 'fallback':error.code in (401,403,404)}
+    except (URLError, TimeoutError, OSError, ValueError) as error:
+        return {'key':key, 'error':str(error), 'ok':False, 'retryable':True, 'fallback':True}
 
 TAG = re.compile(r'\b(?:official\s+)?(?:music\s+video|lyric(?:s)?(?:\s+video)?|audio(?:\s+video)?|visuali[sz]er|mv|m/v)\b|เนื้อเพลง|มิวสิควีดีโอ|มิวสิควิดีโอ|มิวสิกวิดีโอ|オフィシャルビデオ|歌詞|가사|뮤직비디오|歌词|歌詞', re.I)
 PROTECTED = re.compile(r'\b(live|cover|remix|acoustic|instrumental|karaoke|sped\s*up|slowed|nightcore|remaster(?:ed)?)\b|แสดงสด|คัฟเวอร์|คาราโอเกะ|คอนเสิร์ต', re.I)
@@ -295,14 +327,27 @@ def main():
         errors = {}
         completed = 0
         print(f'Metadata: {len(missing)} unique requests; {len(rows)-sum(url_key(r["url"]) in missing for r in rows)} cached rows', flush=True)
-        for result in adaptive_jobs(list(missing.items()), fetch_metadata, 'scan', args.scan_workers):
+        def accept_metadata(result):
+            nonlocal completed
             completed += 1
             if result['ok']:
                 cache[result['key']] = result['info']
                 save_json(cache_path, cache)
+                errors.pop(result['key'], None)
             else:
                 errors[result['key']] = result['error']
-            print(f'Metadata {completed}/{len(missing)}: {"OK" if result["ok"] else "FAILED (kept)"}', flush=True)
+            print(f'Metadata {completed}/{len(missing)}: {"OK" if result["ok"] else "UNRESOLVED (kept)"}', flush=True)
+        fallback = [(key,url) for key,url in missing.items() if not key.startswith('youtube:')]
+        quick = [(key,url) for key,url in missing.items() if key.startswith('youtube:')]
+        for result in adaptive_jobs(quick, quick_youtube_metadata, 'scan', args.scan_workers):
+            if not result['ok'] and result.get('fallback') and not result.get('throttled'):
+                fallback.append((result['key'], missing[result['key']]))
+            else:
+                accept_metadata(result)
+        if fallback:
+            print(f'Fallback: {len(fallback)} titles via yt-dlp (separate low concurrency)', flush=True)
+            for result in adaptive_jobs(fallback, fetch_metadata, 'fallback', 2):
+                accept_metadata(result)
         for row in rows:
             key = url_key(row['url'])
             if key in errors:
@@ -329,7 +374,12 @@ def main():
             flush_archive()
             archive_snapshot = tuple(sorted(archived))
             pending = []
+            unresolved = [row for row in kept if not row.get("info")]
+            (folder/"unresolved.txt").write_text("".join(row["url"]+"\n" for row in unresolved), encoding="utf-8")
+            if unresolved:
+                print(f"Deferred {len(unresolved)} URLs: title unavailable, cannot deduplicate yet. Rerun to retry.")
             for row in kept:
+                if not row.get("info"): continue
                 key = url_key(row['url'])
                 if key.startswith('youtube:') and 'youtube '+key.split(':',1)[1] in archived:
                     continue
@@ -363,7 +413,7 @@ def main():
                     failures.append({'url':row['url'], 'log':str(log_path), 'exit_code':code})
             save_json(folder/'download_errors.json', failures)
             (folder/'download_status.txt').write_text(
-                f'Already archived: {len(kept)-len(pending)}\nAttempted: {len(pending)}\nFailed: {len(failures)}\n'
+                f'Deferred unresolved: {len(unresolved)}\nAlready archived: {len(kept)-len(unresolved)-len(pending)}\nAttempted: {len(pending)}\nFailed: {len(failures)}\n'
                 'See download_errors.json and download_jobs/*.log. Rerun to retry failures.\n', encoding='utf-8')
             if failures: print('Some downloads failed. Rerun to retry; successful downloads are archived.')
     print('Done. Reports:',STATE)
