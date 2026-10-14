@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Local Subtitle Font
 // @namespace    https://github.com/Kuju29/myscp-tampermonkey
-// @version      2026.10.7.3
+// @version      2026.10.14
 // @description  ฟอนต์ในเครื่อง สี และเงาคำบรรยาย ปรับทิศทาง/ขนาดเงาโดยไม่หมุนข้อความ พร้อม log
 // @match        *://www.youtube.com/*
 // @icon         https://www.youtube.com/favicon.ico
@@ -39,7 +39,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '2026.10.7.3';
+    const VERSION = '2026.10.7.4';
     const PREFIX = '[YTLocalFont]';
     // DOM-only mode supplies a userscript window/proxy. Some newer Web APIs
     // reject that proxy as `this` (Illegal invocation), even on a normal click.
@@ -51,7 +51,8 @@
     let enumerationAttempts = 0;
     const KEY = 'yt-local-subtitle-font-v1';
     const STYLE_KEY = 'yt-local-subtitle-style-v1';
-    const CAPTION = '.html5-video-player .ytp-caption-window-container .ytp-caption-segment';
+    const RAW_CAPTION = '.html5-video-player .ytp-caption-window-container .ytp-caption-segment';
+    const CAPTION = '.html5-video-player[data-ytlf-cc-enabled="true"] .ytp-caption-window-container .ytp-caption-segment';
     const OWN = '[data-ytlf-ui]';
     const LIMIT = 600;
     const started = performance.now();
@@ -120,6 +121,26 @@
         const r = element.getBoundingClientRect();
         const s = getComputedStyle(element);
         return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+    }
+
+    function isCaptionEnabled(player) {
+        if (!player?.isConnected) return false;
+        const button = player.querySelector('.ytp-subtitles-button');
+        const ariaPressed = button?.getAttribute('aria-pressed');
+        if (ariaPressed === 'true') return true;
+        if (button?.classList.contains('ytp-button-active')) return true;
+        for (const container of player.querySelectorAll('.ytp-caption-window-container')) {
+            if (visible(container)) return true;
+        }
+        return false;
+    }
+    function syncCaptionState(player, source = 'scan') {
+        if (!player?.isConnected) return false;
+        const enabled = isCaptionEnabled(player);
+        const previous = player.dataset.ytlfCcEnabled === 'true';
+        player.dataset.ytlfCcEnabled = enabled ? 'true' : 'false';
+        if (previous !== enabled) log('caption.toggle_state', { player: player.id || '', enabled, source });
+        return enabled;
     }
     function quote(value) {
         return '"' + String(value).replace(/[\\"\x00-\x1f\x7f]/g, c => `\\${c.charCodeAt(0).toString(16)} `) + '"';
@@ -1024,20 +1045,29 @@
             if (!players.has(player)) {
                 const observer = new MutationObserver(records => {
                     let findPopup = false;
+                    let shouldSyncCaption = false;
                     for (const r of records) {
                         const target = r.target.nodeType === 1 ? r.target : r.target.parentElement;
                         if (target?.closest(OWN) || target?.closest('.ytp-settings-menu')) continue;
-                        if (target?.closest('.ytp-caption-window-container')) { captionUpdates++; continue; }
-                        if (r.addedNodes.length || r.removedNodes.length) findPopup = true;
+                        if (target?.closest('.ytp-caption-window-container')) { captionUpdates++; shouldSyncCaption = true; continue; }
+                        if (target === player || target?.closest('.ytp-subtitles-button')) shouldSyncCaption = true;
+                        if (r.addedNodes.length || r.removedNodes.length) {
+                            findPopup = true;
+                            shouldSyncCaption = true;
+                        }
                     }
+                    if (shouldSyncCaption) syncCaptionState(player, 'mutation');
                     if (findPopup) for (const p of player.querySelectorAll('.ytp-settings-menu')) attachPopup(player, p);
                     if (pendingCaptionAudit) requestAnimationFrame(auditCaptionOnce);
                 });
-                observer.observe(player, { childList: true, subtree: true });
+                observer.observe(player, { childList: true, subtree: true, attributes: true,
+                    attributeFilter: ['class', 'aria-pressed', 'aria-hidden', 'hidden', 'style'] });
                 players.set(player, observer);
+                syncCaptionState(player, 'attach');
                 log('player.attached', { id: player.id, classes: player.className,
-                    playerVersion: player.getAttribute('data-version') });
+                    ccEnabled: player.dataset.ytlfCcEnabled === 'true', playerVersion: player.getAttribute('data-version') });
             }
+            syncCaptionState(player, 'scan');
             for (const popup of player.querySelectorAll('.ytp-settings-menu')) attachPopup(player, popup);
         }
     }
@@ -1049,6 +1079,12 @@
         if (!players.size || [...players.keys()].some(p => !p.isConnected)) scheduleDiscovery();
     });
     discoveryObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    document.addEventListener('click', e => {
+        const subtitles = e.target.closest?.('.ytp-subtitles-button');
+        if (!subtitles) return;
+        const player = subtitles.closest('.html5-video-player');
+        if (player) setTimeout(() => syncCaptionState(player, 'click'), 0);
+    }, true);
     document.addEventListener('click', e => {
         const options = e.target.closest?.('.ytp-panel-options');
         if (!options) return;
@@ -1076,7 +1112,7 @@
     window.addEventListener('resize', sizePicker, { passive: true });
 
     function captionSnapshot() {
-        const nodes = [...document.querySelectorAll(CAPTION)];
+        const nodes = [...document.querySelectorAll(RAW_CAPTION)].filter(n => n.closest('.html5-video-player')?.dataset.ytlfCcEnabled === 'true');
         return { count: nodes.length, updates: captionUpdates, selected: selected?.family || null, alias,
             segments: nodes.slice(0, 4).map(el => {
                 const s = getComputedStyle(el); const r = el.getBoundingClientRect();
@@ -1100,7 +1136,7 @@
                 lastEnumerationStage,
                 loadedFaces: loadedFaces.map(f => ({ family: f.family, status: f.status, style: f.style, weight: f.weight, stretch: f.stretch })) },
             ui: { open: !!picker, viewport: { width: innerWidth, height: innerHeight },
-                players: [...players.keys()].map(p => ({ id: p.id, connected: p.isConnected })),
+                players: [...players.keys()].map(p => ({ id: p.id, connected: p.isConnected, ccEnabled: p.dataset.ytlfCcEnabled === 'true' })),
                 menus: [...popups.values()].filter(s => s.popup.isConnected).map(s => ({
                     shown: visible(s.popup), entries: s.popup.querySelectorAll('.ytlf-entry').length,
                     width: Math.round(s.popup.getBoundingClientRect().width), height: Math.round(s.popup.getBoundingClientRect().height),
