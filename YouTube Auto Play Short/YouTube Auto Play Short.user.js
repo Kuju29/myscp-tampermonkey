@@ -1,26 +1,27 @@
 // ==UserScript==
 // @name         YouTube Auto Play Short
-// @version      2026.10.14.7
+// @version      2026.10.15.2
 // @description  Play short recommendations within your limits. Scoped DOM adapters, guarded playback, and readable English diagnostics.
 // @match        *://www.youtube.com/*
 // @icon         https://www.youtube.com/favicon.ico
 // @updateURL    https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short.user.js
 // @downloadURL  https://github.com/Kuju29/myscp-tampermonkey/raw/refs/heads/main/YouTube%20Auto%20Play%20Short/YouTube%20Auto%20Play%20Short.user.js
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @run-at       document-start
 // @noframes
 // ==/UserScript==
 
 /*
- * Rebuild 2026.10.14.7
+ * Rebuild 2026.10.15.2
  * Flow: page adapter -> evidence -> one candidate per video -> filters -> selection -> playback.
- * Every source, including Next, uses the same filters. Unknown duration never passes.
+ * Primary selection uses filters; fallback uses Next, then random endscreen recommendations.
  * A route change is not proof of media readiness. Old ended events cannot own a new route.
  * Start from a song: recommendations come from YouTube. Title script is not audio language
- * or proof that a recommendation is music. No network requests or private player APIs.
+ * or proof that a recommendation is music. No network requests. Read-only page data with route validation; DOM fallbacks remain available.
  *
  * Saved settings and this tab's played IDs keep their original storage keys.
- * Migration: fallbackNext now means VERIFIED Next only; language is never silently relaxed.
+ * fallbackNext enables unfiltered Next and endscreen fallback when primary selection is empty.
  * No visibility spoofing, global event blocking, automatic unmute, or retry of a denied play().
  * DOM/ARIA are not a YouTube compatibility contract: when evidence is insufficient, stop
  * and explain why. All site-specific selectors live in DOM below.
@@ -29,7 +30,7 @@
     'use strict';
 
     // 1. Configuration and persistent state
-    const VERSION = '2026.10.14.7';
+    const VERSION = '2026.10.15.2';
     const KEYS = { settings: 'youtubeAutoPlaySettings', played: 'playedVideoIds',
         ticket: 'autoShortVerifiedHandoffV2', previous: 'autoShortPreviousReviewV2' };
     const DEFAULTS = Object.freeze({ maxDuration: 600, minViews: 1000000, maxAgeYears: 99,
@@ -43,7 +44,7 @@
         video: 'video', preview: 'ytd-miniplayer, #inline-preview-player, .ytp-ad-preview-container',
         sidebar: 'ytd-watch-next-secondary-results-renderer, #related, #secondary, aside',
         cards: 'yt-lockup-view-model, ytd-compact-video-renderer, ytd-compact-playlist-renderer',
-        endscreen: '.html5-endscreen', endCard: '.ytp-videowall-still, .ytp-modern-videowall-still',
+        endscreen: '.html5-endscreen, .ytp-fullscreen-grid-main-content', endCard: '.ytp-videowall-still, .ytp-modern-videowall-still',
         title: '#video-title, h3, h2, [role="heading"], .ytp-videowall-still-info-title, .ytp-modern-videowall-still-info-title',
         currentTitle: 'ytd-watch-metadata h1, #above-the-fold h1',
         metadata: '#metadata-line, [class*="metadata-row"], [class*="MetadataRow"], .ytp-modern-videowall-still-view-count-and-date-info',
@@ -67,8 +68,7 @@
     let syncTimer = null;
     let navigationTimer = null;
 
-    const norm = value => String(value ?? '').normalize('NFKC').replace(/[\u200b-\u200f\ufeff]/g, '')
-        .replace(/[๐-๙]/g, c => String(c.charCodeAt(0) - 0x0e50)).replace(/\s+/g, ' ').trim();
+    const norm = value => digitText(value).replace(/\s+/g, ' ').trim();
     const text = node => norm(node?.textContent);
     const short = (value, max = 180) => norm(value).slice(0, max);
     const all = (root, selector) => root ? [...root.querySelectorAll(selector)] : [];
@@ -120,6 +120,186 @@
         const url = new URL(location.href), target = watchURL(url.href);
         return { id: target?.id || null, eligible: !!target && !target.playlist,
             key: `${url.pathname}:${target?.id || ''}:${url.searchParams.has('list')}` };
+    }
+
+    // Locale helpers use the browser's ICU data, not a fixed list of translated age words.
+    const intlCache = new Map();
+    const digitText = value => String(value ?? '').normalize('NFKC').replace(/\p{Nd}/gu, c => {
+        const cp = c.codePointAt(0); let first = cp;
+        while (first > 0 && /\p{Nd}/u.test(String.fromCodePoint(first - 1))) first--;
+        return String((cp - first) % 10);
+    }).replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '');
+    const escapeRE = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    function pageLocale() {
+        return document.documentElement.lang || navigator.language || 'en';
+    }
+    function localeTools(locale = pageLocale()) {
+        if (intlCache.has(locale)) return intlCache.get(locale);
+        const out = { compact: [], ages: [], exactAges: new Map() };
+        try {
+            const nf = new Intl.NumberFormat(locale), parts = nf.formatToParts(12345.6);
+            out.group = parts.find(p => p.type === 'group')?.value || ',';
+            out.decimal = parts.find(p => p.type === 'decimal')?.value || '.';
+            const numeric = new Set(['integer', 'decimal', 'fraction', 'group']);
+            for (const display of ['short', 'long']) {
+                const fmt = new Intl.NumberFormat(locale, { notation: 'compact', compactDisplay: display });
+                for (const power of [3, 4, 5, 6, 7, 8, 9, 12]) for (const multiplier of [1, 2, 5]) {
+                    const value = multiplier * 10 ** power, ps = fmt.formatToParts(value);
+                    if (!ps.some(p => p.type === 'compact')) continue;
+                    const rendered = ps.filter(p => numeric.has(p.type)).map(p => p.value).join('');
+                    const n = localeNumber(rendered, out);
+                    if (!n) continue;
+                    let inserted = false, pattern = '';
+                    for (const p of ps) {
+                        if (numeric.has(p.type)) { if (!inserted) pattern += '([0-9][0-9.,٬٫ ]*)'; inserted = true; }
+                        else pattern += escapeRE(digitText(p.value).replace(/\s+/g, ' ')).replace(/ /g, '\\s*');
+                    }
+                    out.compact.push({ re: new RegExp('^' + pattern + '$', 'i'), factor: value / n });
+                }
+            }
+            for (const style of ['long', 'short', 'narrow']) {
+                const fmt = new Intl.RelativeTimeFormat(locale, { style, numeric: 'always' });
+                const natural = new Intl.RelativeTimeFormat(locale, { style, numeric: 'auto' });
+                for (const [unit, scale] of [['year',1],['month',1/12],['week',1/52],['day',1/365],['hour',1/8760],['minute',1/525600],['second',1/31536000]]) {
+                    for (const n of [0, 1, 2, 3, 5, 11, 21, 100]) {
+                        const ps = fmt.formatToParts(-n, unit); let inserted = false, pattern = '';
+                        for (const p of ps) {
+                            if (numeric.has(p.type)) { if (!inserted) pattern += '([0-9][0-9.,٬٫ ]*)'; inserted = true; }
+                            else pattern += escapeRE(digitText(p.value).replace(/\s+/g, ' ')).replace(/ /g, '\\s*');
+                        }
+                        if (inserted) out.ages.push({ re: new RegExp('^' + pattern + '$', 'i'), scale });
+                        const literal = norm(natural.format(-n, unit));
+                        if (!/[0-9]/.test(literal)) out.exactAges.set(literal.toLowerCase(), n * scale);
+                    }
+                }
+            }
+        } catch (_) { /* Unsupported locales retain legacy parsers and structured numbers. */ }
+        if (intlCache.size >= 8) intlCache.delete(intlCache.keys().next().value);
+        intlCache.set(locale, out); return out;
+    }
+    function localeNumber(value, tools = localeTools()) {
+        let raw = digitText(value).trim();
+        if (tools.group) raw = raw.split(tools.group).join('');
+        if (tools.decimal) raw = raw.replace(tools.decimal, '.');
+        raw = raw.replace(/\s/g, '');
+        return /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : null;
+    }
+    function localizedCount(value) {
+        const t = norm(value), tools = localeTools();
+        for (const rule of tools.compact) {
+            const m = t.match(rule.re); if (!m) continue;
+            const n = localeNumber(m[1], tools);
+            if (n !== null) return Math.round(n * rule.factor);
+        }
+        const n = localeNumber(t, tools);
+        return Number.isSafeInteger(n) ? n : null;
+    }
+    function localizedAge(value) {
+        const t = norm(value), tools = localeTools();
+        if (tools.exactAges.has(t.toLowerCase())) return tools.exactAges.get(t.toLowerCase());
+        for (const rule of tools.ages) {
+            const m = t.match(rule.re); if (!m) continue;
+            const n = localeNumber(m[1], tools); if (n !== null) return n * rule.scale;
+        }
+        return null;
+    }
+
+    // Read only known recommendation containers, never scan arbitrary commands/history.
+    const dataText = v => typeof v === 'string' ? norm(v) : norm(v?.simpleText ?? v?.content ?? v?.runs?.map(r => r.text || '').join(''));
+    function walkData(root, visit, limit = 1800) {
+        const queue = [root], seen = new Set(); let i = 0;
+        for (; i < queue.length && i < limit; i++) {
+            const node = queue[i];
+            if (!node || typeof node !== 'object' || seen.has(node)) continue;
+            seen.add(node); if (visit(node) === false) continue;
+            for (const [key, value] of Object.entries(node)) {
+                if (/menu|tracking|logging|feedback|framework|adSlot|promoted|sponsored/i.test(key)) continue;
+                if (value && typeof value === 'object' && queue.length < limit) queue.push(value);
+            }
+        }
+        return i >= limit;
+    }
+    function structuredCard(raw, source) {
+        const id = raw.videoId || (raw.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO' ? raw.contentId : null);
+        if (!validId(id)) return null;
+        const endpoint = raw.navigationEndpoint?.watchEndpoint
+            || raw.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint;
+        if (endpoint?.videoId && endpoint.videoId !== id) return null;
+        const c = { id, url: `https://www.youtube.com/watch?v=${id}`,
+            title: dataText(raw.title || raw.metadata?.lockupMetadataViewModel?.title),
+            sources: [source], adapters: ['page-data'], links: [], watched: false,
+            playlist: !!endpoint?.playlistId, live: raw.isLive === true || !!raw.upcomingEventData,
+            evidence: { duration: [], views: [], age: [] }, conflicts: [], dataEpoch: state.epoch };
+        const add = (field, value, rank, via) => {
+            if (Number.isFinite(value) && value >= 0) c.evidence[field].push({ value, rank, raw: String(value), via: source + '/' + via });
+        };
+        const number = v => typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null;
+        add('duration', number(raw.lengthSeconds ?? raw.lengthInSeconds), 5, 'numeric-duration');
+        add('views', number(raw.viewCount), 5, 'numeric-views');
+        add('duration', parseDuration(dataText(raw.lengthText)), 3, 'duration');
+        add('views', parseViews(dataText(raw.viewCountText || raw.shortViewCountText), true), 3, 'views');
+        add('age', parseAge(dataText(raw.publishedTimeText)), 3, 'age');
+        // Machine-readable dates, when supplied, avoid localized age words entirely.
+        if (typeof raw.publishedTime === 'string' && /^\d{4}-\d\d-\d\d(?:T|$)/.test(raw.publishedTime)) {
+            const stamp = Date.parse(raw.publishedTime);
+            if (stamp <= Date.now()) add('age', (Date.now() - stamp) / 31557600000, 5, 'date');
+        }
+        walkData(raw.thumbnailOverlays || raw.contentImage, node => {
+            const overlay = node.thumbnailOverlayTimeStatusRenderer || node.thumbnailBadgeViewModel;
+            if (overlay) {
+                add('duration', parseDuration(dataText(overlay.text)), 3, 'overlay-clock');
+                if (/LIVE|UPCOMING/.test(overlay.style || overlay.badgeStyle || '')) c.live = true;
+            }
+            const progress = node.thumbnailOverlayResumePlaybackRenderer?.percentDurationWatched
+                ?? node.thumbnailOverlayProgressBarViewModel?.startPercent;
+            if (progress > 0) c.watched = true;
+        }, 160);
+        const rows = raw.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows || [];
+        for (const row of rows) {
+            const parts = row.metadataParts || [];
+            const hasAge = parts.some(p => parseAge(dataText(p.text)) !== null);
+            for (const p of parts) {
+                add('age', parseAge(dataText(p.text)), 3, 'metadata-age');
+                if (hasAge || p.leadingIcon?.name === 'PLAY_ARROW_OUTLINED')
+                    add('views', parseViews(dataText(p.text), true), 3, 'metadata-views');
+            }
+        }
+        return c;
+    }
+    function structuredCandidates() {
+        const out = [], diagnostics = { roots: 0, stale: 0, capped: false, unavailable: false };
+        let page, watchData;
+        try { page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window; watchData = watchRoot()?.data; }
+        catch (_) { diagnostics.unavailable = true; return { candidates: out, diagnostics }; }
+        const roots = new Set();
+        // ytInitialData may remain from an older SPA route: require its own current video ID.
+        try { for (const root of [watchData, page.ytInitialData]) if (root && typeof root === 'object') roots.add(root); }
+        catch (_) { diagnostics.unavailable = true; }
+        for (const root of roots) {
+            if (root.currentVideoEndpoint?.watchEndpoint?.videoId !== state.route?.id) { diagnostics.stale++; continue; }
+            diagnostics.roots++;
+            const next = root.contents?.twoColumnWatchNextResults || root.contents?.singleColumnWatchNextResults;
+            const sidebar = next?.secondaryResults;
+            const endscreen = root.playerOverlays?.playerOverlayRenderer?.endScreen;
+            for (const [container, source] of [[sidebar, 'Sidebar'], [endscreen, 'Endscreen']]) {
+                const capped = walkData(container, node => {
+                    const raw = node.compactVideoRenderer || node.videoRenderer || node.endScreenVideoRenderer || node.lockupViewModel;
+                    if (!raw) return;
+                    const c = structuredCard(raw, source); if (c && out.length < LIMITS.cards) out.push(c);
+                    return false;
+                });
+                diagnostics.capped ||= capped;
+            }
+            if (settings.fallbackNext) {
+                const sets = next?.autoplay?.autoplay?.sets || [];
+                const endpoint = sets[0]?.autoplayVideo?.watchEndpoint;
+                if (validId(endpoint?.videoId) && !endpoint.playlistId) {
+                    const c = structuredCard({ videoId: endpoint.videoId }, 'Next');
+                    if (c) out.push(c);
+                }
+            }
+        }
+        return { candidates: out, diagnostics };
     }
 
     // 2. English diagnostics: all candidates remain visible; raw evidence is exportable.
@@ -207,6 +387,7 @@
     function parseViews(value, allowBare = false) {
         let t = norm(value).toLowerCase();
         if (/^(no views|ยังไม่มีการดู|ไม่มีการดู|ไม่มีการรับชม)$/.test(t)) return 0;
+        if (allowBare) { const local = localizedCount(t); if (local !== null) return local; }
         const labelled = /^(?:การดู|รับชม|조회수)\s*/.test(t) || /\s*(?:views?|ครั้ง|回視聴|次观看|次觀看)$/.test(t);
         if (!allowBare && !labelled) return null;
         t = t.replace(/^(?:การดู|รับชม|조회수)\s*/, '').replace(/\s*(?:views?|ครั้ง|回視聴|次观看|次觀看)$/, '').trim();
@@ -220,6 +401,7 @@
     }
     function parseAge(value) {
         const t = norm(value).toLowerCase().replace(/^(?:streamed|premiered|เผยแพร่|สตรีมเมื่อ)\s*/, '');
+        const local = localizedAge(t); if (local !== null) return local;
         if (/^(today|just now|moments ago|วันนี้|ใหม่)$/.test(t)) return 0;
         if (!/(?:ago|ที่แล้ว|ก่อน|前|전|전에)$/.test(t)) return null;
         const units = [['years?|yrs?|ปี|年|년', 1], ['months?|mos?|เดือน|か月|ヶ月|个月|個月|개월', 1 / 12],
@@ -239,7 +421,15 @@
         if (/[\uac00-\ud7af]/.test(t)) return 'Korean';
         if (/[\u3040-\u30ff]/.test(t)) return 'Japanese';
         if (/[\u4e00-\u9fff]/.test(t)) return 'CJK';
-        return /[A-Za-z]/.test(t) ? 'Latin' : 'Unknown';
+        const scripts = ['Latin', 'Cyrillic', 'Arabic', 'Hebrew', 'Greek', 'Devanagari', 'Bengali', 'Tamil', 'Telugu',
+            'Kannada', 'Malayalam', 'Gujarati', 'Gurmukhi', 'Oriya', 'Sinhala', 'Myanmar', 'Khmer', 'Tibetan',
+            'Georgian', 'Armenian', 'Ethiopic', 'Mongolian'];
+        let best = 'Unknown', count = 0;
+        for (const script of scripts) {
+            const n = (t.match(new RegExp('\\p{Script=' + script + '}', 'gu')) || []).length;
+            if (n > count) { best = script; count = n; }
+        }
+        return best;
     }
     function languageMatches(a, b) {
         return a === b || (['CJK', 'Japanese'].includes(a) && ['CJK', 'Japanese'].includes(b));
@@ -292,7 +482,8 @@
         return values.includes('false') ? 'off' : 'unknown';
     }
     function nextLinks() {
-        const links = new Set(all(state.player, DOM.next));
+        const links = new Set(all(state.player, DOM.next + ', [aria-keyshortcuts]'));
+        for (const el of [...links]) if (!el.matches(DOM.next) && !/shift\s*\+\s*n/i.test(el.getAttribute('aria-keyshortcuts') || '')) links.delete(el);
         for (const el of all(state.player, 'a[href][aria-label], a[href][title]')) {
             if (/^(next|next video|ถัดไป|วิดีโอถัดไป|次へ|다음)(?:\s*\(|$)/i.test(norm(el.getAttribute('aria-label') || el.getAttribute('title')))) links.add(el);
         }
@@ -337,6 +528,11 @@
                 if (!entries.some(e => e.node.contains(node) || node.contains(e.node))) add(node, 'Sidebar', 'structure');
             }
         }
+        // Structural fallback if sidebar host tags and containers were renamed.
+        if (root !== document) for (const node of semanticCards(root)) {
+            if (!state.player?.contains(node) && !node.contains(state.player)
+                && !entries.some(e => e.node.contains(node) || node.contains(e.node))) add(node, 'Sidebar', 'structure-root');
+        }
         for (const node of all(state.player, DOM.endCard)) add(node, 'Endscreen', 'host');
         const endRoots = all(state.player, DOM.endscreen);
         for (const scope of endRoots) for (const node of semanticCards(scope)) {
@@ -369,12 +565,23 @@
             || text(textLink) || norm(node.getAttribute('title')) || norm(links.find(a => a.hasAttribute('title'))?.getAttribute('title'))
             || norm(node.querySelector('img[alt]')?.getAttribute('alt'));
         const c = { id: target.id, url: target.url, title, playlist: links.every(a => watchURL(a.getAttribute('href')).playlist),
-            sources: [source], adapters: [adapter], links, watched: false, live: !!node.querySelector(DOM.live),
+            sources: [source], adapters: [adapter], links, watched: false, live: node.getAttribute('data-is-live') === 'true' || all(node, DOM.live).some(visible),
             evidence: { duration: [], views: [], age: [] }, conflicts: [] };
         const add = (field, value, raw, via, rank = 1) => {
             if (value !== null && Number.isFinite(value) && c.evidence[field].length < 20) c.evidence[field].push({ value, raw: short(raw, 120), via: `${source}/${via}`, rank });
         };
         const parts = fragments(node);
+        if (source === 'Next') {
+            c.title ||= norm(node.getAttribute('data-tooltip-text')) || 'YouTube Next';
+            add('duration', parseDuration(node.getAttribute('data-duration')), node.getAttribute('data-duration'), 'next-duration', 3);
+        }
+        for (const row of all(node, DOM.metadata)) {
+            const segments = text(row).split(/\s*[•·]\s*/);
+            if (segments.length > 1) for (const segment of segments) {
+                add('views', parseViews(segment, true), segment, 'metadata-segment', 3);
+                add('age', parseAge(segment), segment, 'metadata-segment', 3);
+            }
+        }
         const isTitle = el => !!(titleNode?.contains(el) || el.closest('h1,h2,h3,h4,[role="heading"]') || (textLink && textLink.contains(el)));
         const isChannel = el => { const a = el.closest('a[href]'); return !!a && !watchURL(a.getAttribute('href')); };
         const metaParts = parts.filter(p => !isTitle(p.el) && !isChannel(p.el)
@@ -385,7 +592,7 @@
             const inThumbnail = hasThumbnail(p.el.closest('a[href]') || node) && !!p.el.closest('a[href]');
             if (inThumbnail || p.el.closest(DOM.duration)) add('duration', parseDuration(p.value), p.value, 'clock', 3);
             else if (!p.el.closest('a[href]')) add('duration', parseDuration(p.value), p.value, 'structural-clock', 2);
-            if (/^(live|upcoming|premiere|ถ่ายทอดสด|กำลังถ่ายทอดสด|รอชม|พรีเมียร์)$/i.test(p.value)) c.live = true;
+            if (/^(live|upcoming|premiere|ไลฟ์สด|ถ่ายทอดสด|กำลังถ่ายทอดสด|รอชม|พรีเมียร์)$/i.test(p.value) && visible(p.el) && node.getAttribute('data-is-live') !== 'false' && !p.el.closest('.ytp-modern-videowall-still-info-live')) c.live = true;
         }
         for (const p of metaParts) {
             add('views', parseViews(p.value), p.value, 'labelled-views', 3);
@@ -430,32 +637,58 @@
     }
     function collectCandidates() {
         const { entries, capped } = discover(), byId = new Map();
-        const discovery = { cards: entries.length, unique: 0, unreadable: 0, capped, adapters: {} };
+        const structured = structuredCandidates();
+        const discovery = { structured: structured.diagnostics, cards: entries.length, unique: 0, unreadable: 0, capped, adapters: {} };
+        const merge = c => {
+            if (!c) { discovery.unreadable++; return; }
+            const previous = byId.get(c.id);
+            if (!previous) { byId.set(c.id, c); return; }
+            previous.title ||= c.title;
+            previous.playlist &&= c.playlist;
+            previous.watched ||= c.watched;
+            previous.live ||= c.live;
+            if (c.dataEpoch === state.epoch) previous.dataEpoch = c.dataEpoch;
+            previous.sources = [...new Set([...previous.sources, ...c.sources])];
+            previous.adapters = [...new Set([...previous.adapters, ...c.adapters])];
+            previous.links.push(...c.links);
+            for (const field of ['duration', 'views', 'age']) previous.evidence[field].push(...c.evidence[field]);
+        };
+        for (const c of structured.candidates) merge(c);
         for (const entry of entries) {
             const name = `${entry.source}/${entry.adapter}`;
             discovery.adapters[name] = (discovery.adapters[name] || 0) + 1;
-            let c;
-            try { c = readCard(entry); }
-            catch (error) { log('Card parser failed', { adapter: name, ...errorInfo(error) }, 'warn'); }
-            if (!c) { discovery.unreadable++; continue; }
-            const previous = byId.get(c.id);
-            if (!previous) byId.set(c.id, c);
-            else {
-                previous.title ||= c.title;
-                previous.playlist &&= c.playlist;
-                previous.watched ||= c.watched;
-                previous.live ||= c.live;
-                previous.sources = [...new Set([...previous.sources, ...c.sources])];
-                previous.adapters = [...new Set([...previous.adapters, ...c.adapters])];
-                previous.links.push(...c.links);
-                for (const field of ['duration', 'views', 'age']) previous.evidence[field].push(...c.evidence[field]);
-            }
+            try {
+                const attached = entry.node.data;
+                const raw = attached?.lockupViewModel || attached?.compactVideoRenderer || attached;
+                const c = raw && structuredCard(raw, entry.source);
+                if (c && watchLinks(entry.node).some(a => watchURL(a.getAttribute('href'))?.id === c.id)) {
+                    c.adapters = ['element-data']; merge(c);
+                }
+            } catch (_) { discovery.structured.unavailable = true; }
+            try { merge(readCard(entry)); }
+            catch (error) { discovery.unreadable++; log('Card parser failed', { adapter: name, ...errorInfo(error) }, 'warn'); }
         }
         discovery.unique = byId.size;
         return { candidates: [...byId.values()].map(resolveEvidence), discovery };
     }
 
-    // 5. Selection policy. Identical limits for Sidebar, Endscreen and verified Next.
+    // 5. Primary filters and explicitly unfiltered fallback are separate policies.
+    function fallbackReasons(c) {
+        const reasons = [];
+        if (!watchURL(c.url) || c.id === state.route?.id) reasons.push('Invalid or current video');
+        if (c.playlist || c.live) reasons.push('Playlist or live');
+        if (c.dataEpoch !== state.epoch && !c.links.some(el => el.isConnected && watchURL(el.getAttribute('href'))?.id === c.id
+            && !el.closest('[disabled], [aria-disabled="true"], [inert]'))) reasons.push('Unavailable link');
+        return reasons;
+    }
+    function fallbackPool(candidates, failed = new Set()) {
+        const safe = candidates.filter(c => !failed.has(c.id) && !fallbackReasons(c).length);
+        const next = safe.find(c => c.sources.includes('Next'));
+        if (next) return { pool: [next], mode: 'Next fallback' };
+        const end = safe.filter(c => c.sources.includes('Endscreen'));
+        const fresh = end.filter(c => !played.has(c.id));
+        return { pool: fresh.length ? fresh : end, mode: 'Endscreen fallback' };
+    }
     function rejectionReasons(c, language) {
         const reasons = [...c.conflicts];
         if (!c.title) reasons.push('Missing title');
@@ -479,11 +712,11 @@
         const eligible = candidates.filter(c => !c.reasons.length);
         const source = ['Sidebar', 'Endscreen', 'Next'].find(s => eligible.some(c => c.sources.includes(s)));
         const pool = source ? eligible.filter(c => c.sources.includes(source)) : [];
-        const serializable = candidates.map(({ links, ...c }) => c);
+        const serializable = candidates.map(({ links, ...c }) => ({ ...c, readStatus: !c.title || c.duration === null || c.views === null ? 'Incomplete metadata' : 'Readable' }));
         const review = { at: new Date().toISOString(), videoId: state.route?.id, title, language, discovery,
             selectedSource: source || null, poolIds: pool.map(c => c.id), candidates: serializable };
         state.review = review;
-        return { pool, review };
+        return { pool, review, candidates };
     }
     function weightedPick(pool, random = Math.random) {
         const weight = c => settings.neverwatched && !c.watched ? UNWATCHED_WEIGHT : 1;
@@ -600,7 +833,7 @@
         state.binding.handled = true;
         remember(state.route.id);
         const a = { id: ++state.serial, epoch: state.epoch, video: state.video, pass: 0,
-            status: 'selecting', timers: new Set(), signature: '' };
+            status: 'selecting', timers: new Set(), signature: '', failed: new Set() };
         state.attempt = a;
         log('Main video ended', { attempt: a.id, videoId: state.route.id, source });
         later(a, () => selectNext(a), 0);
@@ -616,19 +849,30 @@
         syncPage('selection');
         if (!attemptValid(a)) { cancelAttempt('Playback conditions changed'); return; }
         a.pass++;
-        const { pool, review } = reviewCandidates(), selected = weightedPick(pool);
+        const { pool, review, candidates } = reviewCandidates(), selected = weightedPick(pool.filter(c => !a.failed.has(c.id)));
         const signature = JSON.stringify(review.candidates);
         if (signature !== a.signature || a.pass === 1) { a.signature = signature; showReview(review, selected?.id); }
         if (selected) { navigate(selected, a); return; }
         const potentiallyIncomplete = !review.candidates.length || review.candidates.some(c => c.reasons.length
             && c.reasons.every(r => /^(Unknown|Missing)/.test(r)));
-        if (potentiallyIncomplete && a.pass <= RETRIES.length) {
+        if ((potentiallyIncomplete || settings.fallbackNext) && a.pass <= RETRIES.length) {
             log('Waiting briefly for recommendation metadata', { pass: a.pass, maxPasses: RETRIES.length + 1 });
             later(a, () => selectNext(a), RETRIES[a.pass - 1]);
             return;
         }
+        if (settings.fallbackNext) {
+            const fallback = fallbackPool(candidates, a.failed);
+            const candidate = fallback.pool[Math.floor(Math.random() * fallback.pool.length)];
+            if (candidate) {
+                review.selectionMode = fallback.mode;
+                review.poolIds = fallback.pool.map(c => c.id);
+                log(fallback.mode, { title: candidate.title, ignoredFilters: candidate.reasons });
+                showReview(review, candidate.id);
+                navigate(candidate, a, true); return;
+            }
+        }
         a.status = 'finished';
-        setStatus('No eligible track. Stopped without changing your limits.', 'warn');
+        setStatus(settings.fallbackNext ? 'No usable Next or endscreen recommendation.' : 'No eligible track; fallback is disabled.', 'warn');
     }
     function clearTicket(reason = '') {
         clearTimeout(navigationTimer);
@@ -637,8 +881,8 @@
         storage('session', KEYS.ticket, null);
         if (reason) log('Automatic handoff stopped', { reason });
     }
-    function navigate(candidate, a) {
-        if (!attemptValid(a) || a.status === 'committed' || rejectionReasons(candidate, titleLanguage(currentTitle())).length) return;
+    function navigate(candidate, a, fallback = false) {
+        if (!attemptValid(a) || a.status === 'committed' || (fallback ? fallbackReasons(candidate) : rejectionReasons(candidate, titleLanguage(currentTitle()))).length) return;
         a.status = 'committed';
         const ticket = { from: state.route.id, target: candidate.id, url: candidate.url,
             at: Date.now(), epoch: state.epoch, arrived: false, playRequested: false };
@@ -653,9 +897,9 @@
                 && (!el.target || el.target === '_self');
         });
         try {
-            if (link) link.click();
+            if (link && !fallback) link.click();
             else location.assign(candidate.url);
-        } catch (error) { log('Navigation failed', errorInfo(error), 'error'); clearTicket(); return; }
+        } catch (error) { log('Navigation failed', errorInfo(error), 'error'); clearTicket(); a.failed.add(candidate.id); a.status = 'selecting'; later(a, () => selectNext(a), 0); return; }
         // One retry of the SAME validated target, only if no route transition started.
         navigationTimer = setTimeout(() => {
             syncPage('navigation-check');
@@ -716,7 +960,7 @@
         inspect();
         const report = { tool: 'YouTube Auto Play Short', version: VERSION, at: new Date().toISOString(),
             snapshot: snapshot(), review: state.review, previous: state.previous, logs: logEntries,
-            limitations: 'DOM-only metadata. Title script is not audio language or a music classifier. No cookies, full page HTML, or media URLs included.' };
+            limitations: 'Page data and DOM metadata. Title script is not audio language or a music classifier. No cookies, full page HTML, or media URLs included.' };
         const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json;charset=utf-8' }));
         const link = element('a'); link.href = url; link.download = `AutoShort-${VERSION}-${Date.now()}.json`;
         document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000);
@@ -752,9 +996,9 @@
         field('detectLanguage', 'Match title writing system');
         field('removeWhenReload', 'Reset this tab’s played list on a real reload');
         field('requireAutoplayOff', 'Require a readable YouTube Autoplay OFF switch');
-        field('fallbackNext', 'Allow Next only when its target passes every filter');
+        field('fallbackNext', 'If no match: use Next, then random endscreen video (ignore filters)');
         field('debugDrops', 'Show parser evidence in the console');
-        form.append(element('p', 'Start from a song and turn YouTube Autoplay OFF. All recommendations are checked against the same rules. If none qualify, playback stops. Music type and audio language cannot be verified from titles. Playlists and Shorts feeds are left to YouTube.'));
+        form.append(element('p', 'Start from a song and turn YouTube Autoplay OFF. Filters apply first. With fallback enabled, Next and then random endscreen recommendations bypass duration, views, age and language filters. Music type and audio language cannot be verified from titles. Playlists and Shorts feeds are left to YouTube.'));
         const actions = element('div'); actions.className = 'as-actions';
         const save = element('button', 'Save settings'); save.type = 'submit';
         actions.append(save, button('Inspect candidates', inspect), button('Export log', exportLog)); form.append(actions);
@@ -766,7 +1010,7 @@
             setStatus(persisted ? 'Settings saved. Applied from the next playback cycle.' : 'Settings active in this tab; persistent storage is unavailable.', persisted ? 'info' : 'warn');
         });
         const status = element('div', state.status); status.setAttribute('role', 'status');
-        root.append(style, head, element('p', `Version ${VERSION} · Verified recommendations only`), form, status);
+        root.append(style, head, element('p', `Version ${VERSION} · Filtered selection + optional fallback`), form, status);
         for (const type of ['keydown', 'click', 'pointerdown', 'pointerup']) root.addEventListener(type, event => {
             event.stopPropagation(); if (type === 'keydown' && event.key === 'Escape') root.remove();
         });
@@ -786,7 +1030,7 @@
         state.ticket = { ...savedTicket, arrived: true, playRequested: false };
     } else storage('session', KEYS.ticket, null);
     state.previous = storage('session', KEYS.previous);
-    log(`Ready · v${VERSION}`, { settings, policy: 'Same filters for every source; no unfiltered Next; no silent language relaxation.' });
+    log(`Ready · v${VERSION}`, { settings, policy: 'Filtered recommendations first; optional unfiltered Next, then random endscreen fallback.' });
     for (const type of ['ended', 'playing', 'pause', 'emptied', 'loadstart', 'loadedmetadata', 'loadeddata', 'canplay']) {
         document.addEventListener(type, handleMedia, true);
     }
